@@ -3,6 +3,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Any
 
 import isaaclab.sim as sim_utils
@@ -193,6 +196,52 @@ class LightwheelKitchenBackground(LibraryBackground):
     def get_viewer_cfg(self) -> ViewerCfg:
         # Looking in through the open front.
         return ViewerCfg(eye=(2.75, -5.5, 1.5), lookat=(2.75, -1.4, 0.9))
+
+
+_REPLICATOR_ROOT = Path(__file__).resolve().parents[2] / "Replicator"
+
+
+def _discover_replicator_kitchen_usda_paths() -> dict[str, Path]:
+    """Map ``replicator_<stem>`` registry names to flat ``Replicator/*.usda`` paths."""
+    paths: dict[str, Path] = {}
+    if not _REPLICATOR_ROOT.is_dir():
+        return paths
+    for usda_path in sorted(_REPLICATOR_ROOT.glob("*.usda")):
+        asset_name = f"replicator_{usda_path.stem}"
+        paths[asset_name] = usda_path.resolve()
+    return paths
+
+
+class ReplicatorKitchenBackground(LibraryBackground):
+    """Lightwheel Replicator-generated kitchen floorplan from a flat ``Replicator/*.usda`` file."""
+
+    tags = ["background", "replicator"]
+    initial_pose = Pose.identity()
+    object_min_z = -0.2
+
+    def get_viewer_cfg(self) -> ViewerCfg:
+        return ViewerCfg(eye=(0.0, -1.0, 1.35), lookat=(0.0, 0.0, 1.35))
+
+
+def _register_replicator_kitchen_background(asset_name: str, usda_path: Path) -> None:
+    """Register one ``replicator_<stem>`` background asset class."""
+    slug = asset_name.removeprefix("replicator_")
+    class_suffix = "".join(word.capitalize() for word in slug.split("_"))
+
+    @register_asset
+    class _ReplicatorKitchenEntry(ReplicatorKitchenBackground):
+        name = asset_name
+        usd_path = str(usda_path)
+
+        def __init__(self):
+            super().__init__()
+
+    _ReplicatorKitchenEntry.__name__ = f"Replicator{class_suffix}"
+    _ReplicatorKitchenEntry.__qualname__ = _ReplicatorKitchenEntry.__name__
+
+
+for _asset_name, _usda_path in _discover_replicator_kitchen_usda_paths().items():
+    _register_replicator_kitchen_background(_asset_name, _usda_path)
 
 
 @register_asset
