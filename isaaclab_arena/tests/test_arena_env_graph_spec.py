@@ -13,7 +13,11 @@ from pydantic import ValidationError
 from isaaclab_arena.assets.object_type import ObjectType
 from isaaclab_arena.assets.registries import ObjectRelationLibraryRegistry, TaskRegistry
 from isaaclab_arena.environment_spec.arena_env_graph_spec import ArenaEnvGraphSpec
-from isaaclab_arena.environment_spec.arena_env_graph_types import CliOverrideSpec, TaskCompositionType
+from isaaclab_arena.environment_spec.arena_env_graph_types import (
+    CliOverrideSpec,
+    PlacementValidatorSpec,
+    TaskCompositionType,
+)
 from isaaclab_arena.relations.relations import AtPosition, IsAnchor, On, PositionLimitsBox, PositionLimitsCylindrical
 
 TEST_DATA_DIR = Path(__file__).parent / "test_data"
@@ -338,3 +342,28 @@ def test_graph_spec_omits_empty_optional_fields_from_dict():
     assert "object_references" not in dumped
     assert "cli_override_specs" not in dumped
     assert spec.cli_override_specs is None
+
+
+def test_graph_spec_leaves_placement_debug_view_off_by_default():
+    """A graph YAML that says nothing about debug visualization builds placement params with it off."""
+    from isaaclab_arena.environment_spec.arena_env_graph_conversion_utils import build_checks_for_placer_params
+
+    params = build_checks_for_placer_params(ArenaEnvGraphSpec.from_yaml(_GRAPH))
+
+    assert not params.debug_visualize
+    assert params.debug_visualize_rrd_path is None
+
+
+def test_graph_spec_forwards_placement_debug_view_to_placer_params():
+    """The YAML's placement_validators debug fields reach the params ObjectPlacer reads."""
+    from isaaclab_arena.environment_spec.arena_env_graph_conversion_utils import build_checks_for_placer_params
+
+    spec = ArenaEnvGraphSpec.from_yaml(_GRAPH)
+    spec.placement_validators = PlacementValidatorSpec(
+        debug_visualize=True, debug_visualize_rrd_path="/tmp/placement.rrd"
+    )
+
+    params = build_checks_for_placer_params(spec)
+
+    assert params.debug_visualize
+    assert params.debug_visualize_rrd_path == "/tmp/placement.rrd"
