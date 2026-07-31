@@ -14,6 +14,7 @@ from __future__ import annotations
 import gymnasium as gym
 import torch
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from gr00t.policy.server_client import PolicyClient as Gr00tPolicyClient
@@ -31,6 +32,21 @@ from isaaclab_arena_gr00t.policy.gr00t_core import (
     load_gr00t_joint_configs,
 )
 from isaaclab_arena_gr00t.utils.io_utils import create_config_from_yaml, load_gr00t_modality_config_from_file
+
+
+# A str-valued Enum (not a Literal, which OmegaConf rejects) so the scheduler stays validated at
+# the config layer while composing as a Hydra structured config in typed YAML Experiments.
+class ActionSchedulerType(str, Enum):
+    """Action scheduler used to consume a policy's inference chunks."""
+
+    CHUNK = "chunk"
+    SYNCED_BATCH = "synced_batch"
+
+
+ACTION_SCHEDULER_CLASSES: dict[ActionSchedulerType, type[ActionScheduler]] = {
+    ActionSchedulerType.CHUNK: ActionChunkScheduler,
+    ActionSchedulerType.SYNCED_BATCH: SyncedBatchActionScheduler,
+}
 
 
 # TODO(xinjieyao, 2026-04-27): Consider adding RemotePolicyCfg and deriving this config from it.
@@ -54,10 +70,8 @@ class Gr00tRemoteClosedloopPolicyCfg(Gr00tBasePolicyCfg):
     remote_api_token: str | None = None
     """Optional policy-server API token."""
 
-    # A plain str (not Literal) so the config composes as a Hydra structured config in
-    # typed YAML Experiments; the policy constructor validates the value.
-    scheduler: str = "chunk"
-    """Action scheduler used to consume inference chunks: "chunk" or "synced_batch"."""
+    scheduler: ActionSchedulerType = ActionSchedulerType.CHUNK
+    """Action scheduler used to consume inference chunks."""
 
 
 @register_policy
@@ -73,12 +87,8 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
     def __init__(self, config: Gr00tRemoteClosedloopPolicyCfg):
         super().__init__(config)
 
-        action_scheduler_cls: type[ActionScheduler]
-        if config.scheduler == "synced_batch":
-            action_scheduler_cls = SyncedBatchActionScheduler
-        else:
-            assert config.scheduler == "chunk", f"Unknown action scheduler: {config.scheduler}"
-            action_scheduler_cls = ActionChunkScheduler
+        scheduler_type = ActionSchedulerType(config.scheduler)
+        action_scheduler_cls = ACTION_SCHEDULER_CLASSES[scheduler_type]
 
         # Policy config (for obs/action translation — no model loading)
         # TODO(xinjieyao, 2026-04-27): to be refactored

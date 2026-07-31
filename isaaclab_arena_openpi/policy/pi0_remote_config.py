@@ -31,5 +31,6 @@ class Pi0RemotePolicyCfg(PolicyCfg):
     ping_interval: float | None = 20.0
     """Seconds between websocket keepalive pings, or None to disable pings."""
 
-    ping_timeout: float | None = 20.0
-    """Seconds to wait for a keepalive pong before dropping, or None to wait indefinitely."""
+    ping_timeout: float | None = 300.0
+    """Seconds to wait for a keepalive pong before dropping, or None to wait indefinitely.
+    Long enough to cover a freshly started server compiling its first inference."""

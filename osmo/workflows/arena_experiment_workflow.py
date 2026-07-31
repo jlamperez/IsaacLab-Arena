@@ -15,18 +15,19 @@ from isaaclab_arena.evaluation.arena_run import ArenaRunCfg
 from osmo.tasks.base_task import BaseTask
 from osmo.tasks.collect_experiment_outputs_task import CollectExperimentOutputsTask
 from osmo.tasks.experiment_runner_task import ExperimentRunnerTask, ExperimentRunnerTaskCfg
-from osmo.workflows.server_bindings import REMOTE_POLICY_SERVERS, ServerBinding, ServersCfg
+from osmo.workflows.server_bindings import (
+    ServerBinding,
+    ServerBindingRegistry,
+    ServersCfg,
+    configure_client_for_server,
+    required_server_resource,
+    runs_by_binding,
+)
 from osmo.workflows.workflow import Workflow, WorkflowCfg
 
 
 class ArenaExperimentWorkflow(Workflow):
-    """Run every Arena Experiment Run in its own OSMO group, co-scheduling each Run's server.
-
-    The server for a Run is derived from its client policy config type via
-    ``REMOTE_POLICY_SERVERS``: a matching Run gets a dedicated server task wired to it, and a
-    Run whose policy has no registered server (e.g. a local zero-action policy) runs standalone.
-    Its per-type server deployment config comes from ``servers.<name>``.
-    """
+    """Run every Arena Experiment Run in its own OSMO group, co-scheduling each Run's server."""
 
     constructs_groups_directly = True
     task_cfg_type = ExperimentRunnerTaskCfg
@@ -48,34 +49,18 @@ class ArenaExperimentWorkflow(Workflow):
             task_cfg=task_cfg or ExperimentRunnerTaskCfg(),
             group_name=group_name,
         )
-        self._assert_servers_share_one_pool()
+        # Rejects an Experiment whose servers need different hardware (one submission, one pool).
+        required_server_resource(self.experiment_cfg)
         self._run_server_checks()
 
-    def _server_cfg_for(self, binding: ServerBinding) -> Any:
+    def _server_cfg_for(self, binding: type[ServerBinding]) -> Any:
         """Return the deployment config for a server type from the ``servers`` map."""
         return getattr(self.servers, binding.name)
 
-    def _runs_by_binding(self) -> dict[ServerBinding, list[ArenaRunCfg]]:
-        """Group the Runs that need a server by the server binding that serves them."""
-        runs_by_binding: dict[ServerBinding, list[ArenaRunCfg]] = {}
-        for run_cfg in self.experiment_cfg.runs.values():
-            binding = REMOTE_POLICY_SERVERS.get(type(run_cfg.policy))
-            if binding is not None:
-                runs_by_binding.setdefault(binding, []).append(run_cfg)
-        return runs_by_binding
-
-    def _assert_servers_share_one_pool(self) -> None:
-        """Require every server the Experiment needs to run on one resource (one submission = one pool)."""
-        required_resources = {(binding.pool, binding.platform) for binding in self._runs_by_binding()}
-        assert len(required_resources) <= 1, (
-            f"Experiment needs servers on different resources {sorted(required_resources)}; a submission runs on"
-            " a single pool. Run the incompatible policies as separate submissions."
-        )
-
     def _run_server_checks(self) -> None:
         """Run each server type's compatibility check against the Runs it serves."""
-        for binding, runs_using_binding in self._runs_by_binding().items():
-            binding.check(runs_using_binding, self._server_cfg_for(binding))
+        for binding, runs_using_binding in runs_by_binding(self.experiment_cfg).items():
+            binding.check_runs(runs_using_binding, self._server_cfg_for(binding))
 
     def _get_group_dicts(self) -> list[dict[str, Any]]:
         """Create one independently scheduled group per Run, then collect their outputs into one Experiment output."""
@@ -107,11 +92,11 @@ class ArenaExperimentWorkflow(Workflow):
 
         policy_server_tasks: list[BaseTask] = []
         run_policy_config = single_run_experiment_config.runs[run_name].policy
-        binding = REMOTE_POLICY_SERVERS.get(type(run_policy_config))
+        binding = ServerBindingRegistry().get_binding_for_policy_cfg(run_policy_config)
         if binding is not None:
             server_task_name = f"policy-server-{run_index}"
+            configure_client_for_server(run_policy_config, binding, server_task_name)
             server_cfg = self._server_cfg_for(binding)
-            binding.configure_client(run_policy_config, server_task_name, server_cfg)
             policy_server_tasks.append(binding.server_task_cls(server_cfg, lead=False, task_name=server_task_name))
 
         # Construct this after connecting the policy because the task snapshots the Experiment.

@@ -7,7 +7,6 @@
 
 import json
 import yaml
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,7 +39,7 @@ from osmo.tasks.experiment_runner_task import REMOTE_EXPERIMENT_PATH, Experiment
 from osmo.tasks.gr00t_server_task import Gr00tServerTask, Gr00tServerTaskCfg
 from osmo.tasks.pi0_server_task import Pi0ServerTask, Pi0ServerTaskCfg
 from osmo.workflows.arena_experiment_workflow import ArenaExperimentWorkflow
-from osmo.workflows.server_bindings import GR00T_SERVER_BINDING, REMOTE_POLICY_SERVERS, ServersCfg
+from osmo.workflows.server_bindings import Gr00tServerBinding, ServerBindingRegistry, ServersCfg
 from osmo.workflows.workflow import WorkflowCfg
 from osmo.workflows.workflow_constants import DATASET_SWIFT_URL, OSMO_TASK_OUTPUT_DIR, POLICY_SERVER_PORT
 
@@ -154,18 +153,21 @@ def _compose_and_submit(
 
 
 def test_declares_server_registry():
-    """Keep the client-policy-to-server binding registry explicit."""
-    assert set(REMOTE_POLICY_SERVERS) == {
-        Pi0RemotePolicyCfg,
-        Gr00tRemoteClosedloopPolicyCfg,
-        CosmosRemotePolicyCfg,
-    }
-    assert REMOTE_POLICY_SERVERS[Pi0RemotePolicyCfg].name == "pi0"
-    assert REMOTE_POLICY_SERVERS[Pi0RemotePolicyCfg].server_task_cls is Pi0ServerTask
-    assert REMOTE_POLICY_SERVERS[Gr00tRemoteClosedloopPolicyCfg].name == "gr00t"
-    assert REMOTE_POLICY_SERVERS[Gr00tRemoteClosedloopPolicyCfg].server_task_cls is Gr00tServerTask
-    assert REMOTE_POLICY_SERVERS[CosmosRemotePolicyCfg].name == "cosmos"
-    assert REMOTE_POLICY_SERVERS[CosmosRemotePolicyCfg].server_task_cls is CosmosServerTask
+    """Resolve each remote client policy to its server through the binding registry."""
+    registry = ServerBindingRegistry()
+    assert set(registry.get_all_keys()) == {"pi0", "gr00t", "cosmos"}
+    expected_bindings = [
+        (Pi0RemotePolicyCfg(), "pi0", Pi0ServerTask),
+        (Gr00tRemoteClosedloopPolicyCfg(policy_config_yaml_path=GR00T_CONFIG_YAML_PATH), "gr00t", Gr00tServerTask),
+        (CosmosRemotePolicyCfg(), "cosmos", CosmosServerTask),
+    ]
+    for policy_cfg, expected_name, expected_server_task_cls in expected_bindings:
+        binding = registry.get_binding_for_policy_cfg(policy_cfg)
+        assert binding is registry.get_binding_by_name(expected_name)
+        assert binding.name == expected_name
+        assert binding.server_task_cls is expected_server_task_cls
+    # A policy with no registered server (e.g. a local one) runs standalone.
+    assert registry.get_binding_for_policy_cfg(ZeroActionPolicyCfg()) is None
     assert ArenaExperimentWorkflow.task_cfg_type is ExperimentRunnerTaskCfg
 
 
@@ -182,7 +184,6 @@ def test_explicit_experiment_composes_typed_defaults():
     assert submission_cfg.experiment_runner == ExperimentRunnerTaskCfg()
     assert submission_cfg.experiment_runner.image == "nvcr.io/nvstaging/isaac-amr/isaaclab_arena:latest"
     assert submission_cfg.servers.pi0 == Pi0ServerTaskCfg()
-    assert submission_cfg.servers.pi0.client_ping_timeout_s == Pi0ServerTaskCfg.client_ping_timeout_s
 
     with pytest.raises(AssertionError, match="policy_variant must be one of"):
         _compose_submission(["servers.pi0.policy_variant=unknown"])
@@ -250,9 +251,10 @@ def test_fans_out_single_run_experiments_with_dedicated_pi0_servers_and_one_expe
     assert first_experiment["runs"]["first"]["policy"]["remote_host"] == Pi0ServerTask.host_token("policy-server-0")
     assert second_experiment["runs"]["second"]["policy"]["remote_host"] == Pi0ServerTask.host_token("policy-server-1")
     for run_name, experiment in (("first", first_experiment), ("second", second_experiment)):
-        policy = experiment["runs"][run_name]["policy"]
-        assert policy["remote_port"] == POLICY_SERVER_PORT
-        assert policy["ping_timeout"] == Pi0ServerTaskCfg.client_ping_timeout_s
+        assert experiment["runs"][run_name]["policy"]["remote_port"] == POLICY_SERVER_PORT
+    # Only the connection is rewritten: each Run keeps the ping timeout its policy asked for.
+    assert first_experiment["runs"]["first"]["policy"]["ping_timeout"] == 10
+    assert second_experiment["runs"]["second"]["policy"]["ping_timeout"] == Pi0RemotePolicyCfg.ping_timeout
     assert "remote_host" not in local_experiment["runs"]["local"]["policy"]
     assert "remote_port" not in local_experiment["runs"]["local"]["policy"]
     assert source_experiment_cfg.runs["first"].policy.remote_host == "user-host"
@@ -342,11 +344,7 @@ def test_mixed_pi0_and_gr00t_experiment_fans_out_per_run_servers():
 
 def test_rejects_servers_requiring_different_pools(monkeypatch):
     """Reject an Experiment whose derived servers need different pools (one submission, one pool)."""
-    monkeypatch.setitem(
-        REMOTE_POLICY_SERVERS,
-        Gr00tRemoteClosedloopPolicyCfg,
-        replace(GR00T_SERVER_BINDING, pool="isaac-other-pool"),
-    )
+    monkeypatch.setattr(Gr00tServerBinding, "pool", "isaac-other-pool")
 
     with pytest.raises(AssertionError, match="different resources"):
         ArenaExperimentWorkflow(
@@ -462,7 +460,6 @@ def test_submission_composes_defaults_experiment_and_overrides(tmp_path, capsys)
             "experiment_runner.image=registry.example.com/evaluator:branch",
             "servers.pi0.image=registry.example.com/openpi:overridden",
             "servers.pi0.policy_config=overridden-pi0-config",
-            "servers.pi0.client_ping_timeout_s=600.0",
             "experiment_cfg.runs.openpi_maple_table.rollout_limit.num_episodes=4",
             "experiment_cfg.runs.openpi_maple_table.environment_builder.num_envs=2",
             "experiment_cfg.runs.openpi_maple_table.policy.ping_interval=33.0",
@@ -488,7 +485,7 @@ def test_submission_composes_defaults_experiment_and_overrides(tmp_path, capsys)
     assert policy["ping_interval"] == 33.0
     assert policy["remote_host"] == Pi0ServerTask.host_token("policy-server-0")
     assert policy["remote_port"] == POLICY_SERVER_PORT
-    assert policy["ping_timeout"] == 600.0
+    assert policy["ping_timeout"] == 450.0
     assert "experiment_cfg.runs" not in _task_file(tasks[0], "/tmp/entry.sh")["contents"]
 
     server_command = _task_file(tasks[1], "/tmp/entry.sh")["contents"]
@@ -518,7 +515,7 @@ def test_embedded_openpi_experiment_composes_through_experiment_runner_loader(tm
         assert isinstance(run_cfg.policy, Pi0RemotePolicyCfg)
         assert run_cfg.policy.remote_host == Pi0ServerTask.host_token(f"policy-server-{index}")
         assert run_cfg.policy.remote_port == POLICY_SERVER_PORT
-        assert run_cfg.policy.ping_timeout == Pi0ServerTaskCfg.client_ping_timeout_s
+        assert run_cfg.policy.ping_timeout == Pi0RemotePolicyCfg.ping_timeout
 
 
 def test_submission_overrides_osmo_resources(monkeypatch):
@@ -561,7 +558,7 @@ def test_cli_requires_experiment_cfg_path(capsys):
 
 
 def test_cli_help_explains_paths_and_override_names(capsys):
-    """Describe the Experiment path, derived servers, and typed override syntax."""
+    """Describe the Experiment path and typed override syntax."""
     with pytest.raises(SystemExit, match="0"):
         main(["--help"])
     help_text = capsys.readouterr().out
@@ -569,8 +566,6 @@ def test_cli_help_explains_paths_and_override_names(capsys):
     assert "--experiment_cfg PATH" in help_text
     assert "path to a typed Arena Experiment YAML configuration" in normalized_help_text
     assert "droid_pnp_srl_openpi_experiment.yaml" in help_text
-    assert "servers.<name>" in help_text
-    assert "derived from the Run's client policy" in normalized_help_text
     assert "typed defaults < Experiment YAML < CLI overrides" in help_text
     assert "osmo.workflow_name=my-evaluation" in help_text
     assert "experiment_cfg.runs.droid_pnp_srl_openpi_billiard_hall.rollout_limit.num_episodes=4" in help_text

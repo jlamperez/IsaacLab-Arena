@@ -23,7 +23,7 @@ from isaaclab_arena.hydra.typed_experiment_serializer import serialize_arena_exp
 from isaaclab_arena.utils.hydra_overrides import assert_hydra_overrides
 from osmo.tasks.experiment_runner_task import ExperimentRunnerTaskCfg
 from osmo.workflows.arena_experiment_workflow import ArenaExperimentWorkflow
-from osmo.workflows.server_bindings import REMOTE_POLICY_SERVERS, ServerBinding, ServersCfg
+from osmo.workflows.server_bindings import ServersCfg, required_server_resource, runs_by_binding
 from osmo.workflows.workflow import WorkflowCfg
 
 SUBMISSION_CONFIG_NAME = "osmo_arena_experiment_submission"
@@ -37,7 +37,8 @@ class ArenaExperimentSubmissionCfg:
     """Evaluation semantics executed by ``experiment_runner.py``."""
 
     servers: ServersCfg = field(default_factory=ServersCfg)
-    """Per-server-type deployment config; the server(s) launched are derived from the Runs."""
+    """Per server-type config. This allows all servers in an experiment to share the same
+    config, which can be overridden via Hydra."""
 
     osmo: WorkflowCfg = field(default_factory=WorkflowCfg)
     """OSMO scheduling, resource, and timeout configuration."""
@@ -64,25 +65,16 @@ def submit_arena_experiment(submission_cfg: ArenaExperimentSubmissionCfg) -> int
     return workflow.submit_workflow().returncode
 
 
-def _used_server_bindings(experiment_cfg: ArenaExperimentCfg) -> set[ServerBinding]:
-    """Return the server bindings the Experiment needs, derived from each Run's client policy."""
-    return {
-        REMOTE_POLICY_SERVERS[type(run_cfg.policy)]
-        for run_cfg in experiment_cfg.runs.values()
-        if type(run_cfg.policy) in REMOTE_POLICY_SERVERS
-    }
-
-
 def _osmo_cfg_for_experiment(experiment_cfg: ArenaExperimentCfg) -> WorkflowCfg:
-    """Derive the workflow resource from the Experiment's servers (they must share one pool)."""
-    required_resources = {(binding.pool, binding.platform) for binding in _used_server_bindings(experiment_cfg)}
-    assert len(required_resources) <= 1, (
-        f"Experiment needs servers on different resources {sorted(required_resources)}; a submission runs on a"
-        " single pool. Run the incompatible policies as separate submissions."
-    )
-    if not required_resources:
+    """Derive the default workflow resource from the Experiment's servers, which share one pool.
+
+    This is the composition default, so an explicit ``osmo.pool``/``osmo.platform`` override
+    still wins.
+    """
+    server_resource = required_server_resource(experiment_cfg)
+    if server_resource is None:
         return WorkflowCfg()
-    ((pool, platform),) = required_resources
+    pool, platform = server_resource
     return WorkflowCfg(pool=pool, platform=platform)
 
 
@@ -123,11 +115,11 @@ def build_arena_experiment_submission_cfg(
 def format_submission_config(submission_cfg: ArenaExperimentSubmissionCfg) -> str:
     """Render the composed submission as YAML; every leaf is a valid Hydra KEY=VALUE override.
 
-    Only the server types the Experiment actually uses are shown. The experiment section reuses
-    the Experiment serializer so graph-YAML environments render in their reload-friendly
-    ``type:`` form rather than the internal argparse tokens.
+    Only the server types the Experiment actually uses are shown.
     """
-    used_server_names = {binding.name for binding in _used_server_bindings(submission_cfg.experiment_cfg)}
+    used_server_names = []
+    for binding in runs_by_binding(submission_cfg.experiment_cfg):
+        used_server_names.append(binding.name)
     servers_values = OmegaConf.to_container(
         OmegaConf.structured(submission_cfg.servers), resolve=True, enum_to_str=True
     )
@@ -149,9 +141,6 @@ def _create_argument_parser() -> argparse.ArgumentParser:
         description="Submit a typed Arena Experiment as an OSMO workflow.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=r"""
-The policy server for each Run is derived from the Run's client policy in the Experiment;
-override a server's deployment with servers.<name>.* (e.g. servers.pi0.policy_config=...).
-
 Example:
 
   python -m osmo.submit_arena_experiment \

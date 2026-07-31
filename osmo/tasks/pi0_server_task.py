@@ -41,9 +41,6 @@ class Pi0ServerTaskCfg(TaskCfg):
     policy_dir: str = "gs://openpi-assets-simeval/pi05_droid_jointpos"
     """openpi checkpoint directory."""
 
-    client_ping_timeout_s: float | None = 300.0
-    """Seconds Arena clients wait for a pong while the OSMO server compiles its first inference."""
-
     def __post_init__(self) -> None:
         assert (
             self.policy_variant in PI0_POLICY_VARIANTS

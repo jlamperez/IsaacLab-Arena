@@ -8,8 +8,10 @@
 A distributed Experiment fails whole when a single Run's process stalls with no output. This
 wrapper runs the wrapped command as a subprocess, forwards its output, and treats a silence
 longer than ``--stall-timeout-seconds`` as a hang: it kills the process group, clears the
-output directory, and relaunches, up to ``--max-restarts`` times. A clean exit (any return
-code) is propagated as-is and never restarted.
+output directory, and relaunches, up to ``--max-restarts`` times. A cold start is silent for
+much longer than a running command, so silence before the first output is tolerated for
+``--startup-timeout-seconds`` instead. A clean exit (any return code) is propagated as-is and
+never restarted.
 
 This is a stop-gap: the real fix is finding why Runs stall in the first place.
 """
@@ -35,6 +37,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=300.0,
         help="Restart the command if it emits no output for this many seconds. Default 300 (5 min).",
+    )
+    parser.add_argument(
+        "--startup-timeout-seconds",
+        type=float,
+        default=1800.0,
+        help=(
+            "Seconds of silence tolerated before the command's first output. A cold start loads assets"
+            " and compiles kernels without printing, so this is longer than the running stall timeout."
+            " Default 1800 (30 min)."
+        ),
     )
     parser.add_argument(
         "--max-restarts",
@@ -65,6 +77,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.command = args.command[1:]
     assert args.command, "No command to run. Pass the command after '--'."
     assert args.stall_timeout_seconds > 0, "--stall-timeout-seconds must be positive."
+    assert args.startup_timeout_seconds > 0, "--startup-timeout-seconds must be positive."
     assert args.max_restarts >= 0, "--max-restarts must be non-negative."
     return args
 
@@ -101,9 +114,15 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
 
 
 def _run_once(
-    command: list[str], stall_timeout_seconds: float, poll_interval_seconds: float
+    command: list[str],
+    stall_timeout_seconds: float,
+    startup_timeout_seconds: float,
+    poll_interval_seconds: float,
 ) -> tuple[int | None, bool]:
     """Run the command once, forwarding output.
+
+    Silence is tolerated for ``startup_timeout_seconds`` until the command's first output and
+    for ``stall_timeout_seconds`` after it.
 
     Returns a ``(return_code, stalled)`` pair: on a clean exit ``return_code`` is the process
     exit code and ``stalled`` is False; on a detected stall ``return_code`` is None and
@@ -116,21 +135,32 @@ def _run_once(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-        bufsize=1,
-        text=True,
+        bufsize=0,
     )
 
     last_output_monotonic = time.monotonic()
+    any_output_seen = False
     output_lock = threading.Lock()
 
     def _pump_output() -> None:
         assert process.stdout is not None
-        for line in process.stdout:
-            nonlocal last_output_monotonic
+        nonlocal last_output_monotonic, any_output_seen
+        output_fd = process.stdout.fileno()
+        while True:
+            # Read whatever bytes are available rather than iterating lines: progress output that
+            # only ever emits carriage returns is liveness too, and waiting for a newline would
+            # make the watchdog treat a working command as stalled.
+            try:
+                chunk = os.read(output_fd, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
             with output_lock:
                 last_output_monotonic = time.monotonic()
-            sys.stdout.write(line)
-            sys.stdout.flush()
+                any_output_seen = True
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
 
     pump_thread = threading.Thread(target=_pump_output, daemon=True)
     pump_thread.start()
@@ -144,9 +174,11 @@ def _run_once(
                 return return_code, False
             with output_lock:
                 idle_seconds = time.monotonic() - last_output_monotonic
-            if idle_seconds > stall_timeout_seconds:
+                silence_limit = stall_timeout_seconds if any_output_seen else startup_timeout_seconds
+            if idle_seconds > silence_limit:
+                phase = "since launch" if silence_limit == startup_timeout_seconds else "for"
                 print(
-                    f"[watchdog] No output for {idle_seconds:.0f}s (limit {stall_timeout_seconds:.0f}s); "
+                    f"[watchdog] No output {phase} {idle_seconds:.0f}s (limit {silence_limit:.0f}s); "
                     "killing the process group.",
                     flush=True,
                 )
@@ -183,7 +215,12 @@ def main() -> int:
         print(f"[watchdog] Launching (attempt {attempt + 1}): {' '.join(command)}", flush=True)
 
         try:
-            return_code, stalled = _run_once(command, args.stall_timeout_seconds, args.poll_interval_seconds)
+            return_code, stalled = _run_once(
+                command,
+                args.stall_timeout_seconds,
+                args.startup_timeout_seconds,
+                args.poll_interval_seconds,
+            )
         except KeyboardInterrupt:
             print("[watchdog] Interrupted; terminating any running child and exiting.", flush=True)
             return 130

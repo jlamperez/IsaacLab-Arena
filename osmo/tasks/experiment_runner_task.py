@@ -44,6 +44,9 @@ class ExperimentRunnerTaskCfg(TaskCfg):
     watchdog_stall_timeout_seconds: float = 600.0
     """Relaunch the runner if it emits no output for this long. Non-positive disables the watchdog."""
 
+    watchdog_startup_timeout_seconds: float = 1800.0
+    """Silence tolerated before the runner's first output, covering a silent Isaac Sim cold start."""
+
     watchdog_max_restarts: int = 5
     """Maximum number of stall-triggered relaunches before the task gives up."""
 
@@ -115,6 +118,8 @@ class ExperimentRunnerTask(BaseTask):
             EXPERIMENT_RUNNER_WATCHDOG_SCRIPT,
             "--stall-timeout-seconds",
             str(self.task_cfg.watchdog_stall_timeout_seconds),
+            "--startup-timeout-seconds",
+            str(self.task_cfg.watchdog_startup_timeout_seconds),
             "--max-restarts",
             str(self.task_cfg.watchdog_max_restarts),
             "--output-directory",

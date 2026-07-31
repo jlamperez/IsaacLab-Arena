@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cosmos inference-server task for OSMO eval workflows, used by the Cosmos policy-runner task."""
+"""Cosmos inference-server task."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from typing import Any
 from osmo.tasks.base_task import BaseTask, TaskCfg
 from osmo.workflows.workflow_constants import POLICY_SERVER_PORT
 
-# Server entry point inside the cosmos_server image (see isaaclab_arena_cosmos/docker/run_cosmos_server.sh).
 COSMOS_SERVER_MODULE = "cosmos_framework.scripts.action_policy_server_robolab"
 
 
@@ -23,14 +22,10 @@ class CosmosServerTaskCfg(TaskCfg):
     """Config for the Cosmos inference-server task."""
 
     image: str = "nvcr.io/nvstaging/isaac-amr/isaaclab_arena:cosmos_server"
-    """Cosmos3-Edge-Policy server image (built by isaaclab_arena_cosmos/docker/build_server_image.sh)."""
+    """Cosmos server image (built by isaaclab_arena_cosmos/docker/build_server_image.sh)."""
 
     checkpoint: str = "/workspace/baked_checkpoint"
-    """Checkpoint the server serves. Baked into the image at build time (see build_server_image.sh),
-    so the running server needs no HuggingFace token — kept in sync with that script's ``BAKED_CHECKPOINT_PATH``."""
-
-    client_ping_timeout_s: float | None = 300.0
-    """Seconds Arena clients wait for a pong while the server loads its checkpoint and compiles."""
+    """Checkpoint the server serves. Baked into the image at build time (see build_server_image.sh)."""
 
 
 class CosmosServerTask(BaseTask):
