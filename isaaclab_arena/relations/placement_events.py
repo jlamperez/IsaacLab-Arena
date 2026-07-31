@@ -49,15 +49,6 @@ class PlacementPoolHandle:
         return self
 
 
-def resolve_placement_pool(value: PooledObjectPlacer | PlacementPoolHandle | None) -> PooledObjectPlacer | None:
-    """Return the underlying pool, unwrapping a handle when present."""
-    if value is None:
-        return None
-    if isinstance(value, PlacementPoolHandle):
-        return value.pool
-    return value
-
-
 def get_placement_pool(env) -> PooledObjectPlacer | None:
     """Return the pooled placer stored on the env reset event, or ``None`` when absent.
 
@@ -71,7 +62,8 @@ def get_placement_pool(env) -> PooledObjectPlacer | None:
         term_cfg = env.unwrapped.event_manager.get_term_cfg(PLACEMENT_RESET_EVENT_NAME)
     except ValueError:
         return None
-    return resolve_placement_pool(term_cfg.params.get("placement_pool"))
+    handle = term_cfg.params.get("placement_pool")
+    return None if handle is None else handle.pool
 
 
 def get_rotation_xyzw(asset: PlaceableAsset) -> tuple[float, float, float, float]:
@@ -145,7 +137,7 @@ def write_layout_to_sim(
 def solve_and_place_objects(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
-    placement_pool: PooledObjectPlacer | PlacementPoolHandle,
+    placement_pool: PlacementPoolHandle,
 ) -> None:
     """Coordinated reset event that draws layouts from the pool and writes poses.
 
@@ -156,20 +148,19 @@ def solve_and_place_objects(
     Args:
         env: The Isaac Lab environment.
         env_ids: 1-D tensor of environment indices being reset.
-        placement_pool: Runtime pool of solved placement layouts (or opaque handle).
-            Layout assets come from ``placement_pool.objects``.
+        placement_pool: Opaque handle to the runtime pool of solved placement layouts.
+            Layout assets come from ``placement_pool.pool.objects``.
     """
-    placement_pool = resolve_placement_pool(placement_pool)
-    assert placement_pool is not None, "placement_reset event is missing its placement pool."
+    pool = placement_pool.pool
     if env_ids is None or len(env_ids) == 0:
         return
-    assets = placement_pool.objects
+    assets = pool.objects
     reset_env_ids = env_ids.tolist()
     num_scene_envs = env.scene.env_origins.shape[0]
     assert (
-        placement_pool.num_envs == num_scene_envs
-    ), f"Placement pool has {placement_pool.num_envs} envs, but scene has {num_scene_envs} env origins."
-    results_by_env = placement_pool.sample_for_envs(reset_env_ids)
+        pool.num_envs == num_scene_envs
+    ), f"Placement pool has {pool.num_envs} envs, but scene has {num_scene_envs} env origins."
+    results_by_env = pool.sample_for_envs(reset_env_ids)
     anchor_assets = set(get_anchor_objects(assets))
     base_rotations = get_base_rotation_per_asset(assets)
 
