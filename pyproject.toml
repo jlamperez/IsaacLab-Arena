@@ -124,6 +124,18 @@ conflicts = [
         { group = "isaaclab-from-wheel" },
         { group = "isaaclab-from-source" },
     ],
+    # simready-search pins boto3==1.42.58, while both sim-stack flavors reach
+    # isaacsim-kernel, which pins boto3==1.40.61. The two cannot share a uv
+    # environment. The Docker image is unaffected: Isaac Sim comes from the base
+    # image there, not from the PyPI wheel that carries the pin.
+    [
+        { extra = "simready" },
+        { group = "isaaclab-from-wheel" },
+    ],
+    [
+        { extra = "simready" },
+        { group = "isaaclab-from-source" },
+    ],
 ]
 # Isaac Lab is explicitly pinned to a beta, while Isaac Sim requires a
 # transitive tinyobjloader release candidate. The exact constraint below makes
