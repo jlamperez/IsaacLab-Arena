@@ -34,6 +34,55 @@ except Exception:
 requires_warp = pytest.mark.skipif(not _WARP_AVAILABLE, reason="Warp not available")
 
 
+@requires_warp
+def test_release_warp_meshes_keeps_trimesh_and_spheres():
+    """release_warp_meshes drops only wp.Mesh entries."""
+    manager = WarpMeshAndSphereCache(num_spheres=8, device="cpu")
+    mesh = trimesh.creation.box(extents=(0.1, 0.1, 0.1))
+    manager.get_query_spheres(mesh)
+    manager.get_warp_mesh(mesh)
+    assert len(manager._warp_mesh_cache) == 1
+    assert len(manager._sphere_cache) == 1
+
+    manager.release_warp_meshes()
+
+    assert len(manager._warp_mesh_cache) == 0
+    assert len(manager._sphere_cache) == 1
+    # Rebuild Warp mesh without recomputing spheres.
+    manager.get_warp_mesh(mesh)
+    assert len(manager._warp_mesh_cache) == 1
+    assert len(manager._sphere_cache) == 1
+
+
+@requires_warp
+def test_relation_solver_release_mesh_collision_resources_keeps_manager():
+    """Solver release clears mesh_id cache and wp.Mesh but keeps the mesh manager."""
+    table = _make_table()
+    a = _make_cylinder("a", radius=0.05)
+    b = _make_cylinder("b", radius=0.05)
+    a.collision_mode = CollisionMode.MESH
+    b.collision_mode = CollisionMode.MESH
+    a.add_relation(On(table))
+    b.add_relation(On(table))
+    # Overlapping so prepare_mesh_collision_cache builds subject/obstacle warp meshes.
+    initial = [{table: (0.0, 0.0, 0.0), a: (0.0, 0.0, 0.05), b: (0.02, 0.0, 0.05)}]
+
+    solver = RelationSolver(params=RelationSolverParams(collision_mode=CollisionMode.MESH, max_iters=0, verbose=False))
+    solver.solve([table, a, b], initial)
+    assert solver._mesh_manager is not None
+    assert solver._mesh_cache is not None
+    assert len(solver._mesh_manager._warp_mesh_cache) >= 1
+    spheres_before = len(solver._mesh_manager._sphere_cache)
+
+    solver.release_mesh_collision_resources()
+
+    assert solver._mesh_cache is None
+    assert solver._mesh_collision_enabled is False
+    assert solver._mesh_manager is not None
+    assert len(solver._mesh_manager._warp_mesh_cache) == 0
+    assert len(solver._mesh_manager._sphere_cache) == spheres_before
+
+
 # Unit tests
 
 

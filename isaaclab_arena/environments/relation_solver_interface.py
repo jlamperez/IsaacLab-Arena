@@ -180,6 +180,12 @@ def _apply_dynamic_spawn_pose(
     [construction_layout] = placement_pool.sample_with_replacement(1)
     _seed_spawn_config_from_layout(assets, anchor_assets, construction_layout)
 
+    # Drop wp.Mesh BVHs built during the construction solve (keep trimesh/sphere caches).
+    # The pool handle shares the live placer across EventTermCfg deep-copies, so Warp
+    # meshes would otherwise stay pinned through Kit/Fabric startup and can break
+    # instanceable visuals (e.g. the Droid stand).
+    placement_pool.release_mesh_collision_resources()
+
     return EventTermCfg(
         func=solve_and_place_objects,
         mode="reset",

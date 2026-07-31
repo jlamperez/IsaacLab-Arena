@@ -60,6 +60,19 @@ class RelationSolver:
         self._mesh_cache: MeshPairCache | None = None
         self._mesh_collision_enabled = False
 
+    def release_mesh_collision_resources(self) -> None:
+        """Drop ``wp.Mesh`` / ``wp.array`` collision state; keep trimesh and sphere caches.
+
+        Clears ``_mesh_cache`` (holds ``mesh_id_array`` tied to released meshes) and any
+        cached Warp BVHs on ``_mesh_manager``. The manager itself is retained so the next
+        ``prepare_mesh_collision_cache`` can rebuild Warp meshes from cached trimeshes.
+        """
+        if self._mesh_manager is not None:
+            self._mesh_manager.release_warp_meshes()
+        self._mesh_cache = None
+        self._mesh_collision_enabled = False
+        self._mesh_orientations = None
+
     def _get_strategy(self, relation: RelationBase) -> RelationLossStrategy | UnaryRelationLossStrategy:
         """Look up the loss strategy for a relation type.
 

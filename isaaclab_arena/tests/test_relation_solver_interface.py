@@ -45,6 +45,9 @@ class _FakePlacementPool:
     def sample_with_replacement(self, count: int):
         return self._layouts[:count]
 
+    def release_mesh_collision_resources(self) -> None:
+        """No-op: fake pools never hold Warp meshes."""
+
 
 def _fallback_layout(positions):
     """A failed (best-loss fallback) PlacementResult: a failing required check makes success False."""
@@ -196,6 +199,12 @@ def test_dynamic_spawn_pose_event_cfg_deepcopy_after_mesh_solve():
 
     assert event_cfg is not None
     assert isinstance(event_cfg, EventTermCfg)
+    # Construction solve released wp.Mesh; trimesh/sphere caches may remain on the manager.
+    pool = event_cfg.params["placement_pool"].pool
+    manager = pool._placer._solver._mesh_manager
+    assert pool._placer._solver._mesh_cache is None
+    if manager is not None:
+        assert len(manager._warp_mesh_cache) == 0
     copy.deepcopy(event_cfg)
     from isaaclab.utils.configclass import _validate
 

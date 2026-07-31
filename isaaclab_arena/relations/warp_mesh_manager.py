@@ -209,6 +209,15 @@ class WarpMeshAndSphereCache:
             self._warp_mesh_cache[key] = wp.Mesh(points=vertices, indices=indices)
         return self._warp_mesh_cache[key]
 
+    def release_warp_meshes(self) -> None:
+        """Drop cached ``wp.Mesh`` BVHs only; keep trimesh and sphere decompositions.
+
+        Warp meshes hold device ctypes pointers that cannot be deep-copied and must not
+        stay pinned across Kit/Fabric startup. Trimesh/sphere caches are CPU-safe and
+        speed rebuilding ``wp.Mesh`` on the next solve/validate.
+        """
+        self._warp_mesh_cache.clear()
+
     def get_query_spheres(self, mesh: trimesh.Trimesh, obj: CollisionObject | None = None) -> torch.Tensor:
         """Get or compute sphere decomposition as (K, 4) tensor [cx, cy, cz, radius]."""
         key = self._cache_key(mesh, obj)
