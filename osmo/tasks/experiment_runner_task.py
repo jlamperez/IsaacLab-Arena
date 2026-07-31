@@ -20,6 +20,8 @@ from osmo.workflows.workflow_constants import DATASET_SWIFT_URL, OSMO_TASK_OUTPU
 
 # Repository-relative entry point executed inside the task container.
 EXPERIMENT_RUNNER_SCRIPT = "isaaclab_arena/evaluation/experiment_runner.py"
+# Stall-restart wrapper that relaunches the runner if it hangs with no output.
+EXPERIMENT_RUNNER_WATCHDOG_SCRIPT = "isaaclab_arena/evaluation/experiment_runner_watchdog.py"
 # Default container image containing Arena and its runtime dependencies.
 DEFAULT_EXPERIMENT_RUNNER_IMAGE = "nvcr.io/nvstaging/isaac-amr/isaaclab_arena:latest"
 # Location where OSMO creates the effective Experiment YAML for the runner.
@@ -32,6 +34,18 @@ class ExperimentRunnerTaskCfg(TaskCfg):
 
     image: str = DEFAULT_EXPERIMENT_RUNNER_IMAGE
     """Container image that runs the Arena Experiment."""
+
+    record_camera_video: bool = True
+    """Record one mp4 per (env, camera, episode) from each Run's camera observations."""
+
+    record_viewport_video: bool = False
+    """Record a viewport video for each Run."""
+
+    watchdog_stall_timeout_seconds: float = 600.0
+    """Relaunch the runner if it emits no output for this long. Non-positive disables the watchdog."""
+
+    watchdog_max_restarts: int = 5
+    """Maximum number of stall-triggered relaunches before the task gives up."""
 
 
 class ExperimentRunnerTask(BaseTask):
@@ -81,4 +95,30 @@ class ExperimentRunnerTask(BaseTask):
             "none",
             "--enable_cameras",
         ]
-        return f"set -euo pipefail\n{shlex.join(command)}\n"
+        if self.task_cfg.record_camera_video:
+            command.append("--record_camera_video")
+        if self.task_cfg.record_viewport_video:
+            command.append("--record_viewport_video")
+        command = self._wrap_with_watchdog(command)
+        # Disable HDF5 file locking: each Run writes its own single-writer episode dataset, so the
+        # lock buys nothing, and a stalled process the watchdog kills can leave the lock held on the
+        # cluster filesystem — making the relaunched Run die creating its dataset (BlockingIOError,
+        # errno 11). Exported before the command so the watchdog and every relaunched child inherit it.
+        return f"set -euo pipefail\nexport HDF5_USE_FILE_LOCKING=FALSE\n{shlex.join(command)}\n"
+
+    def _wrap_with_watchdog(self, command: list[str]) -> list[str]:
+        """Wrap the runner command so a stalled Run is killed and relaunched on a fresh output dir."""
+        if self.task_cfg.watchdog_stall_timeout_seconds <= 0:
+            return command
+        return [
+            "/isaac-sim/python.sh",
+            EXPERIMENT_RUNNER_WATCHDOG_SCRIPT,
+            "--stall-timeout-seconds",
+            str(self.task_cfg.watchdog_stall_timeout_seconds),
+            "--max-restarts",
+            str(self.task_cfg.watchdog_max_restarts),
+            "--output-directory",
+            OSMO_TASK_OUTPUT_DIR,
+            "--",
+            *command,
+        ]
