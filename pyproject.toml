@@ -35,8 +35,9 @@ dev = [
     "tenacity",
     "streamlit>=1.56",
     "streamlit-ace>=0.1.1",
-]
-simready = [
+    # Asset search for agentic environment generation. Kept here rather than behind an extra of
+    # its own: it adds one wheel, since Isaac Sim already brings everything it depends on, and an
+    # extra only bought a way to install the review GUI with its asset search missing.
     "simready-search>=2026.4.2",
 ]
 
@@ -150,8 +151,8 @@ index-strategy = "first-index"
 # asks for boto3==1.42.58, requests>=2.32.5 and s3transfer 0.16.x, all of which
 # are over-strict. The Docker image runs its S3 asset searches against the
 # boto3 1.40.61 / requests 2.32.3 / s3transfer 0.14.0 that isaacsim-kernel
-# pins. Without these overrides the simready extra cannot resolve alongside
-# either sim-stack flavor at all, leaving the search with no installable runtime.
+# pins. Without these overrides simready-search cannot resolve alongside either
+# sim-stack flavor at all, leaving the asset search with no installable runtime.
 override-dependencies = [
     "numpy==2.3.1",
     "coverage==7.4.4",
