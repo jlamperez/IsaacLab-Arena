@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import pytest
+
 from isaaclab_arena.utils.isaac_sim_debug_draw import (
     oriented_bbox_corners,
     oriented_bbox_edge_segments,
@@ -101,3 +103,57 @@ def test_classify_entity_kind_fixed_collision_object():
     mesh = trimesh.creation.box(extents=(0.1, 0.1, 0.1))
     fixed = FixedCollisionObject(mesh, name="fixed_collision_mesh")
     assert classify_entity_kind(fixed) == "background"
+
+
+def test_solver_world_aabb_fixed_collision_object_is_world_baked():
+    import trimesh
+
+    from isaaclab_arena.relations.background_collision_object import FixedCollisionObject
+    from isaaclab_arena.utils.placement_debug_overlay import solver_world_aabb
+    from isaaclab_arena.utils.pose import Pose
+
+    mesh = trimesh.creation.box(extents=(0.2, 0.4, 0.6))
+    mesh.apply_translation([1.0, 2.0, 3.0])
+    fixed = FixedCollisionObject(mesh, name="fixed")
+    # Pose must be ignored: mesh / AABB are already in world frame.
+    pose = Pose(position_xyz=(9.0, 9.0, 9.0), rotation_xyzw=(0.0, 0.0, 0.70710678, 0.70710678))
+    world = solver_world_aabb(fixed, pose)
+    expected = fixed.get_world_bounding_box()
+    assert np.allclose(world.min_point.numpy(), expected.min_point.numpy())
+    assert np.allclose(world.max_point.numpy(), expected.max_point.numpy())
+
+
+def test_solver_world_aabb_live_placeable_matches_rotated_then_translated():
+    """Non-anchor placeables: solver refits AABB under quat, then translates (not OBB draw)."""
+    import math
+
+    from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
+    from isaaclab_arena.utils.placement_debug_overlay import solver_world_aabb
+    from isaaclab_arena.utils.pose import Pose
+
+    class _FakePlaceable:
+        name = "fake"
+
+        def get_bounding_box(self):
+            return AxisAlignedBoundingBox(min_point=(-2.0, -0.5, 0.0), max_point=(2.0, 0.5, 1.0))
+
+        def get_world_bounding_box(self):
+            raise AssertionError("live non-anchors must not use get_world_bounding_box in overlay")
+
+        def get_relations(self):
+            return []
+
+    yaw = math.pi / 2
+    # xyzw for +90 deg about Z
+    quat = (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+    pose = Pose(position_xyz=(10.0, 20.0, 30.0), rotation_xyzw=quat)
+    asset = _FakePlaceable()
+    world = solver_world_aabb(asset, pose)
+    expected = asset.get_bounding_box().rotated_by_quat(quat).translated(pose.position_xyz)
+    assert np.allclose(world.min_point.numpy(), expected.min_point.numpy())
+    assert np.allclose(world.max_point.numpy(), expected.max_point.numpy())
+    # Must remain axis-aligned in world (solver style), not an OBB at the live pose.
+    # After 90° Z, the long axis (was X) becomes Y: extents ~1 on X, ~4 on Y.
+    size = (world.max_point - world.min_point)[0].tolist()
+    assert size[0] == pytest.approx(1.0, abs=1e-5)
+    assert size[1] == pytest.approx(4.0, abs=1e-5)

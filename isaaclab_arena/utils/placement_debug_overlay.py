@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from isaaclab_arena.relations.collision_mode import CollisionMode, object_uses_mesh_collision
 from isaaclab_arena.relations.placement_events import get_placement_pool
+from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 from isaaclab_arena.utils.isaac_sim_debug_draw import IsaacSimDebugDraw
 from isaaclab_arena.utils.pose import Pose
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from isaaclab_arena.relations.pooled_object_placer import PooledObjectPlacer
 
 IDENTITY_XYZW = (0.0, 0.0, 0.0, 1.0)
+IDENTITY_POS = (0.0, 0.0, 0.0)
 
 # One RGBA color per scene-entity kind.
 KIND_COLORS: dict[str, tuple[float, float, float, float]] = {
@@ -72,7 +74,7 @@ def _quat_wxyz_to_xyzw(quat_wxyz) -> tuple[float, float, float, float]:
 
 
 def _live_pose_for_asset(env, asset: CollisionObject) -> Pose | None:
-    """Return the world pose used to place solver geometry for ``asset``."""
+    """Return the world pose used to place mesh overlay geometry for ``asset``."""
     from isaaclab_arena.relations.background_collision_object import FixedCollisionObject
     from isaaclab_arena.relations.placement_asset import PlaceableAsset
 
@@ -98,6 +100,36 @@ def _live_pose_for_asset(env, asset: CollisionObject) -> Pose | None:
     if isinstance(initial, Pose):
         return initial
     return Pose.identity()
+
+
+def solver_world_aabb(asset: CollisionObject, pose: Pose) -> AxisAlignedBoundingBox:
+    """World AABB matching relation-solver / validator construction.
+
+    Placement AABBs from USD (``get_bounding_box``) are world-axis-aligned extents with
+    only translation removed — not an oriented box in the prim's local frame. The solver
+    therefore never draws them as OBBs under a full pose:
+
+    - Anchors / ``ObjectReference`` / ``FixedCollisionObject``: ``get_world_bounding_box()``
+      (quarter-turn Z from the fixed pose + translate), as cached in ``RelationSolverState``.
+    - Live placeables: ``local.rotated_by_quat(pose).translated(position)``, matching
+      ``ObjectPlacer._rotate_candidate_bboxes`` then validator ``.translated(positions)``.
+
+    Applying a full rigid pose to the local AABB (oriented draw) double-applies rotation for
+    rotated USD prims (e.g. kitchen floor Cube) and diverges from On / no-overlap checks.
+    """
+    from isaaclab_arena.assets.object_reference import ObjectReference
+    from isaaclab_arena.relations.background_collision_object import FixedCollisionObject
+    from isaaclab_arena.relations.relations import IsAnchor, get_relation
+
+    if isinstance(asset, (FixedCollisionObject, ObjectReference)):
+        return asset.get_world_bounding_box()
+
+    # RelationSolverState caches get_world_bounding_box() for every IsAnchor asset.
+    if get_relation(asset, IsAnchor) is not None:
+        return asset.get_world_bounding_box()
+
+    local = asset.get_bounding_box()
+    return local.rotated_by_quat(pose.rotation_xyzw).translated(pose.position_xyz)
 
 
 class PlacementDebugOverlay:
@@ -181,17 +213,18 @@ class PlacementDebugOverlay:
                 continue
             if entry.draw_aabb:
                 try:
-                    bbox = entry.asset.get_bounding_box()
+                    # Draw the solver's world AABB (axis-aligned), not a full-pose OBB.
+                    world_bbox = solver_world_aabb(entry.asset, pose)
                 except Exception as exc:  # noqa: BLE001 — debug overlay must not crash the runner
                     print(f"[placement_debug] skip AABB for '{entry.name}': {exc}", flush=True)
                 else:
-                    min_pt = tuple(float(v) for v in bbox.min_point[0].tolist())
-                    max_pt = tuple(float(v) for v in bbox.max_point[0].tolist())
+                    min_pt = tuple(float(v) for v in world_bbox.min_point[0].tolist())
+                    max_pt = tuple(float(v) for v in world_bbox.max_point[0].tolist())
                     self._draw.draw_oriented_bbox(
                         min_pt,
                         max_pt,
-                        pose.position_xyz,
-                        pose.rotation_xyzw,
+                        IDENTITY_POS,
+                        IDENTITY_XYZW,
                         color=entry.color,
                         thickness=3.0,
                     )
@@ -199,6 +232,7 @@ class PlacementDebugOverlay:
                 mesh = entry.asset.get_collision_mesh()
                 if mesh is None:
                     continue
+                # Collision meshes are in a true local (or world-baked) frame; apply the live pose.
                 self._draw.draw_trimesh_wireframe(
                     mesh,
                     color=entry.color,
