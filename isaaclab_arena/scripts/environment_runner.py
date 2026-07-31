@@ -19,6 +19,12 @@ Run an environment graph spec:
 
     python isaaclab_arena/scripts/environment_runner.py \
         --env_graph_spec_yaml isaaclab_arena_environments/robolab/tasks/banana_in_bowl.yaml
+
+Overlay placement AABBs / MESH collision wireframes:
+
+    python isaaclab_arena/scripts/environment_runner.py \
+        --show_placement_debug \
+        --env_graph_spec_yaml isaaclab_arena_environments/kitchen_bench/droid_pick_and_place_lightwheel_kitchen.yaml
 """
 
 from __future__ import annotations
@@ -50,11 +56,25 @@ def _assert_interactive_runner_args(args_cli: argparse.Namespace) -> None:
     assert args_cli.device == "cpu", "environment_runner mouse interaction requires CPU PhysX; use --device cpu"
 
 
+def _add_placement_debug_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add placement wireframe overlay flags (must stay top-level, before env subparser)."""
+    group = parser.add_argument_group("Placement Debug Arguments")
+    group.add_argument(
+        "--show_placement_debug",
+        action="store_true",
+        help=(
+            "Overlay relation-solver placement AABBs and MESH-mode collision meshes as Kit wireframes, "
+            "with a console legend of colors and entity names."
+        ),
+    )
+
+
 def _parse_interactive_runner_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse and validate arguments for interactive environment inspection."""
     args_parser = get_isaaclab_arena_cli_parser()
     args_parser.set_defaults(device="cpu", visualizer=["kit"], disable_fabric=True)
     args_parser.allow_abbrev = False
+    _add_placement_debug_arguments(args_parser)
     args_parser = get_isaaclab_arena_environments_cli_parser(args_parser)
 
     args_cli, hydra_overrides = args_parser.parse_known_args()
@@ -109,11 +129,27 @@ def _create_interactive_environment(
 def run_environment(
     simulation_app: SimulationAppContext,
     env: gym.Env,
+    *,
+    show_placement_debug: bool = False,
 ) -> None:
     """Reset once, then run one environment with zero actions until Kit closes."""
     env.reset()
     zero_actions = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
     rate_limiter = RateLimiter(period_seconds=env.unwrapped.step_dt)
+
+    placement_overlay = None
+    if show_placement_debug:
+        from isaaclab_arena.utils.placement_debug_overlay import PlacementDebugOverlay
+
+        placement_overlay = PlacementDebugOverlay.from_env(env)
+        if placement_overlay is None:
+            print(
+                "[environment_runner] --show_placement_debug set but no placement pool on the env; skipping overlay.",
+                flush=True,
+            )
+        else:
+            placement_overlay.print_legend()
+            placement_overlay.redraw(env)
 
     print(
         "[environment_runner] Environment running. Hold Shift, then left-drag a physics object.",
@@ -125,6 +161,8 @@ def run_environment(
         with torch.inference_mode():
             while simulation_app.is_running() and not simulation_app.is_exiting():
                 env.step(zero_actions)
+                if placement_overlay is not None:
+                    placement_overlay.redraw(env)
                 rate_limiter.sleep()
     except KeyboardInterrupt:
         print("\n[environment_runner] Exiting.", flush=True)
@@ -139,7 +177,7 @@ def main() -> None:
         env = _create_interactive_environment(args_cli, hydra_overrides)
         try:
             _enable_mouse_interaction()
-            run_environment(simulation_app, env)
+            run_environment(simulation_app, env, show_placement_debug=args_cli.show_placement_debug)
         finally:
             env.close()
 
