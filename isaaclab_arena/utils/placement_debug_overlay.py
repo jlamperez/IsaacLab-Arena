@@ -68,11 +68,6 @@ def classify_entity_kind(asset: CollisionObject) -> str:
     return "other"
 
 
-def _quat_wxyz_to_xyzw(quat_wxyz) -> tuple[float, float, float, float]:
-    w, x, y, z = (float(v) for v in quat_wxyz)
-    return (x, y, z, w)
-
-
 def _live_pose_for_asset(env, asset: CollisionObject) -> Pose | None:
     """Return the world pose used to place mesh overlay geometry for ``asset``."""
     from isaaclab_arena.relations.background_collision_object import FixedCollisionObject
@@ -93,8 +88,12 @@ def _live_pose_for_asset(env, asset: CollisionObject) -> Pose | None:
         scene_asset = None
     if scene_asset is not None and hasattr(scene_asset, "data") and hasattr(scene_asset.data, "root_pos_w"):
         pos = scene_asset.data.root_pos_w[0].detach().cpu().tolist()
-        quat_wxyz = scene_asset.data.root_quat_w[0].detach().cpu().tolist()
-        return Pose(position_xyz=tuple(float(v) for v in pos), rotation_xyzw=_quat_wxyz_to_xyzw(quat_wxyz))
+        # Isaac Lab root_quat_w is (x, y, z, w) — same as Arena Pose.rotation_xyzw.
+        quat_xyzw = scene_asset.data.root_quat_w[0].detach().cpu().tolist()
+        return Pose(
+            position_xyz=tuple(float(v) for v in pos),
+            rotation_xyzw=tuple(float(v) for v in quat_xyzw),
+        )
 
     initial = asset.get_initial_pose()
     if isinstance(initial, Pose):
