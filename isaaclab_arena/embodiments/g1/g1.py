@@ -7,6 +7,7 @@ import math
 import torch
 from collections.abc import Sequence
 from dataclasses import MISSING
+from pathlib import Path
 
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils  # noqa: F401
@@ -16,6 +17,7 @@ import warp as wp
 from isaaclab.actuators import IdealPDActuatorCfg
 from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLMimicEnv  # noqa: F401
+from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -106,6 +108,43 @@ _DEFAULT_G1_CAMERA_OFFSET = Pose(
     position_xyz=(0.04485, 0.0, 0.35325), rotation_xyzw=(-0.62721, 0.62721, -0.32651, 0.32651)
 )
 
+# G1_GRIPPER.usd (the Dex1 variant's spawn asset, see _make_dex1_gripper_variant) authors
+# head_link as a plain child Xform of torso_link with no PhysicsRigidBodyAPI/joint of its
+# own -- unlike the Nucleus-hosted dexterous-hand USD, where head_link is an independent
+# rigid body attached via a PhysicsFixedJoint. PhysX (and the Fabric-backed camera render
+# path) only pushes per-step world-transform updates for prims that are themselves rigid
+# bodies, so a camera parented under this USD's head_link renders from a pose frozen at
+# spawn time forever, even though the robot (and torso_link) is genuinely moving under it.
+# Until G1_GRIPPER.usd is patched to give head_link its own rigid body (the "real" fix),
+# G1AgileDex1CameraCfg below parents the camera to torso_link instead -- which is a real
+# rigid body -- offset by head_link's own (tiny, identity-rotation) local transform relative
+# to torso_link composed with _DEFAULT_G1_CAMERA_OFFSET, so the camera sits at the exact same
+# physical point it would occupy on head_link, but with a pose PhysX actually updates.
+#
+# Superseded 2026-07-31: G1_GRIPPER.usd itself carries a real ``d435_link`` mount point
+# (torso-relative translate (0.057623, 0.017530, 0.429870), pitched 47.6 deg down --
+# matches Unitree's own xr_teleoperate URDF exactly), sitting well within the head-shaped
+# visual mesh's own height range (z 0.325-0.531 relative to torso_link). Unitree's
+# hardware doc (Device.md) describes this as an interchangeable head-camera mount --
+# "Monocular: built-in Realsense D435i" or an external stereo module -- so this is a real,
+# precisely-defined mounting point/angle, not another visual guess. Position and pitch
+# below are taken directly from it (pitch re-derived the same way as the earlier 15/25 deg
+# attempts, keeping the local "right" axis fixed), then nudged 2cm further along the
+# camera's own forward direction -- per Jorge's CAD reference, the external stereo module
+# sits a bit further out/proud of the face panel than the more recessed built-in D435i.
+#
+# Shifted +3cm in y (robot's left) 2026-07-31: the head camera is a stereo pair
+# (HBVCAM-4M2214HD-2 V11, 60mm baseline per its spec sheet), and our checkpoint was
+# fine-tuned on cam_0 only, not a centered/monocular view. Measured which eye cam_0 is via
+# cross-correlation of real cam_0 vs cam_1 frame 0 (episode_000000): cam_1's content is
+# shifted 40px left of cam_0's, i.e. features sit further left in cam_1 -- by the standard
+# stereo convention (a point appears further left in the right-eye image), cam_0 is the
+# LEFT eye. Offset by half the baseline (30mm) toward the robot's left.
+_DEX1_HEAD_CAMERA_OFFSET = Pose(
+    position_xyz=(0.07110954589344007, 0.04752999983727932, 0.41510090260978455),
+    rotation_xyzw=(0.65925248, -0.65925248, 0.25570719, -0.25570719),
+)
+
 
 @register_asset
 class G1WBCJointEmbodiment(G1EmbodimentBase):
@@ -181,6 +220,36 @@ class G1WBCAgilePinkEmbodiment(G1EmbodimentBase):
         self.observation_config.wbc.concatenate_terms = self.concatenate_observation_terms
         self.observation_config.action.concatenate_terms = self.concatenate_observation_terms
         self.event_config = G1WBCPinkEventCfg()
+
+
+@register_asset
+class G1WBCAgilePinkDex1Embodiment(G1WBCAgilePinkEmbodiment):
+    """G1 with AGILE WBC + PINK IK upper body, and the Dex1 2-finger gripper instead of the dexterous hand.
+
+    For the IKEA assembly challenge -- the real training dataset
+    (BitRobot/G1_WBT_Dex1_Building-Children-Table) was recorded with this
+    gripper. ``scene_config`` (:data:`G1_AGILE_GRIPPER_CFG` instead of
+    :data:`G1_AGILE_CFG`) and ``action_config`` (adds the two Dex1 gripper
+    action terms) differ from :class:`G1WBCAgilePinkEmbodiment`; see
+    :class:`G1WBCAgilePinkDex1ActionCfg` for why the gripper doesn't need
+    changes to the WBC/IK pipeline itself. ``camera_config`` also differs --
+    see :class:`G1AgileDex1CameraCfg`.
+    """
+
+    name = "g1_wbc_agile_pink_dex1"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        lock_waist: bool = False,
+    ):
+        super().__init__(enable_cameras, initial_pose, lock_waist)
+        self.scene_config = G1AgileDex1SceneCfg()
+        self.camera_config = G1AgileDex1CameraCfg()
+        self.action_config = G1WBCAgilePinkDex1ActionCfg()
+        if lock_waist:
+            _remove_waist_from_pink_ik_action_config(self.action_config)
 
 
 @register_asset
@@ -411,6 +480,54 @@ G1_CFG = ArticulationCfg(
 )
 
 
+# Dex1 2-finger gripper variant, for the IKEA assembly challenge -- the real
+# training dataset (BitRobot/G1_WBT_Dex1_Building-Children-Table) was recorded
+# with this gripper, not the dexterous hand G1_CFG/G1_AGILE_CFG point at. Points
+# to a local USD (not on Nucleus) copied from robofinals' g1_urdf_gripper/ asset;
+# see assemble_table_environment.py's _IKEA_ASSETS_DIR for the same
+# local-submodule-path convention. A function (not a one-off block) because it's
+# applied to both G1_CFG and G1_AGILE_CFG below -- the AGILE variant needs the
+# same Dex1 swap on top of its already-tuned leg/feet/waist gains.
+_G1_DEX1_ASSET_DIR = Path(__file__).resolve().parents[3] / "submodules" / "g1_urdf_gripper"
+
+
+def _make_dex1_gripper_variant(cfg: ArticulationCfg) -> ArticulationCfg:
+    """Return a copy of ``cfg`` with the dexterous hand swapped for the Dex1 2-finger gripper.
+
+    Actuator gains for legs/feet/waist/arms are left untouched -- only what
+    actually changes with the Dex1 (spawn asset, hand/gripper actuator, and the
+    finger joints' initial position) is overridden, rather than porting
+    robofinals' separate ``G1_GEARWBC_CFG`` actuator model (built for a
+    different USD/motor set).
+    """
+    dex1_cfg = cfg.copy()
+    dex1_cfg.spawn.usd_path = str(_G1_DEX1_ASSET_DIR / "G1_GRIPPER.usd")
+    # No dexterous-hand joints on this USD -- replaced by the Dex1 gripper actuator below.
+    del dex1_cfg.actuators["hands"]
+    dex1_cfg.init_state.joint_pos.update(
+        {
+            # Open position -- mirrors robofinals' Dex1GripperCfg OPEN_POS.
+            "left_dex1_finger_joint_1": 0.0245,
+            "left_dex1_finger_joint_2": 0.0245,
+            "right_dex1_finger_joint_1": 0.0245,
+            "right_dex1_finger_joint_2": 0.0245,
+        }
+    )
+    dex1_cfg.actuators["grippers"] = IdealPDActuatorCfg(
+        joint_names_expr=[".*_dex1_finger_joint_.*"],
+        effort_limit=20.0,
+        velocity_limit=5.0,
+        stiffness=200.0,
+        damping=5.0,
+        armature=0.03,
+        friction=0.0,
+    )
+    return dex1_cfg
+
+
+G1_GRIPPER_CFG = _make_dex1_gripper_variant(G1_CFG)
+
+
 # Motor model constants for the AGILE recurrent-student G1 policy. Naming and
 # values mirror ``agile/rl_env/assets/robots/unitree_g1.py`` so the AGILE source
 # of truth is greppable across repos. Stiffness/damping derive from the standard
@@ -472,6 +589,10 @@ G1_AGILE_CFG.actuators["waist"].damping = {
 }
 G1_AGILE_CFG.actuators["waist"].armature = 0.03
 
+# AGILE-tuned legs/feet/waist gains plus the Dex1 gripper -- for the IKEA
+# challenge embodiment, which needs both (see _make_dex1_gripper_variant above).
+G1_AGILE_GRIPPER_CFG = _make_dex1_gripper_variant(G1_AGILE_CFG)
+
 
 @configclass
 class G1SceneCfg:
@@ -483,6 +604,13 @@ class G1AgileSceneCfg(G1SceneCfg):
     """G1 scene config with actuator gains tuned for the AGILE recurrent policy."""
 
     robot: ArticulationCfg = G1_AGILE_CFG.copy()
+
+
+@configclass
+class G1AgileDex1SceneCfg(G1AgileSceneCfg):
+    """G1 scene config with AGILE actuator gains and the Dex1 2-finger gripper."""
+
+    robot: ArticulationCfg = G1_AGILE_GRIPPER_CFG.copy()
 
 
 @configclass
@@ -502,6 +630,43 @@ class G1CameraCfg(ArenaCameraCfg):
         offset=CameraCfg.OffsetCfg(
             pos=_DEFAULT_G1_CAMERA_OFFSET.position_xyz,
             rot=_DEFAULT_G1_CAMERA_OFFSET.rotation_xyzw,
+            convention="ros",
+        ),
+    )
+
+
+@configclass
+class G1AgileDex1CameraCfg(G1CameraCfg):
+    """Camera configuration for the Dex1 embodiment -- see :data:`_DEX1_HEAD_CAMERA_OFFSET`.
+
+    Parents ``robot_head_cam`` to ``torso_link`` instead of ``head_link``, since
+    G1_GRIPPER.usd's ``head_link`` is not a physics rigid body and never receives
+    per-step world-transform updates.
+    """
+
+    robot_head_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link/RobotHeadCam",
+        update_period=0.0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            # focal_length tuned to match the real head camera's FOV, so the checkpoint
+            # (fine-tuned on real images from that lens) sees objects at roughly the scale/
+            # distance it learned, not whatever the shared G1CameraCfg's 15 (~70 deg)
+            # happens to render. 12.5 (~80 deg, per the HBVCAM-4M2214HD-2 V11 spec sheet)
+            # is the best-supported estimate -- tried 5.454 (~125 deg, per Unitree's generic
+            # xr_teleoperate hardware options doc) too, but that rendered objects far too
+            # small/distant next to the real reference footage, so reverted to 12.5. Getting
+            # a pixel-perfect match isn't fully achievable anyway -- our background scene
+            # (Table278's open floor beyond it) differs structurally from the real footage's
+            # walled room, independent of any focal_length choice.
+            focal_length=12.5,
+            clipping_range=(0.1, 5),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=_DEX1_HEAD_CAMERA_OFFSET.position_xyz,
+            rot=_DEX1_HEAD_CAMERA_OFFSET.rotation_xyzw,
             convention="ros",
         ),
     )
@@ -767,6 +932,36 @@ class G1WBCAgilePinkActionCfg:
         wbc_version="agile",
         upperbody_active_joint_groups=["arms"],
         upperbody_extra_active_joints=["waist_roll_joint", "waist_yaw_joint", "waist_pitch_joint"],
+    )
+
+
+@configclass
+class G1WBCAgilePinkDex1ActionCfg(G1WBCAgilePinkActionCfg):
+    """Action specifications for G1 AGILE WBC + PINK IK upper body, with the Dex1 2-finger gripper.
+
+    ``g1_action``'s ``joint_names=[".*"]`` still matches every joint on the
+    articulation, including the 4 Dex1 finger joints, but the WBC/IK pipeline
+    behind it only knows about the dexterous hand's 7-joints-per-hand layout (see
+    :class:`~isaaclab_arena_g1.g1_whole_body_controller...G1WBCUpperbodyController`).
+    Rather than teach that pipeline about a second hand model, the two gripper
+    terms below are declared after ``g1_action`` -- the ``ActionManager`` applies
+    terms in configclass field order (base-class fields first), so whatever
+    ``g1_action`` writes for the 4 Dex1 joint indices is overwritten by these two
+    terms' explicit open/close targets every step. No change to the WBC/IK
+    internals required.
+    """
+
+    left_gripper_action: ActionTermCfg = BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["left_dex1_finger_joint_1", "left_dex1_finger_joint_2"],
+        open_command_expr={"left_dex1_finger_joint_.*": 0.0245},
+        close_command_expr={"left_dex1_finger_joint_.*": -0.02},
+    )
+    right_gripper_action: ActionTermCfg = BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["right_dex1_finger_joint_1", "right_dex1_finger_joint_2"],
+        open_command_expr={"right_dex1_finger_joint_.*": 0.0245},
+        close_command_expr={"right_dex1_finger_joint_.*": -0.02},
     )
 
 
