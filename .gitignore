@@ -82,6 +82,15 @@ TAGS
 # Datasets
 *datasets/
 
+# Cached/generated data under replay_data/ -- the scripts themselves ARE tracked.
+/isaaclab_arena_gr00t/policy/replay_data/*.npz
+/isaaclab_arena_gr00t/policy/replay_data/debug_chunks/
+/isaaclab_arena_gr00t/policy/replay_data/__pycache__/
+
+# Local asset kits dropped under submodules/ that aren't real git submodules
+/submodules/IROS_IKEA_V13_20260702/
+/submodules/g1_urdf_gripper/
+
 # Training logs and outputs
 *wandb/
 
