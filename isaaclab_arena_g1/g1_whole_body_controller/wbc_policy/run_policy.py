@@ -32,9 +32,13 @@ def convert_sim_joint_to_wbc_joint(
     if not isinstance(sim_joint_data, np.ndarray):
         sim_joint_data = sim_joint_data.cpu().numpy()
 
-    for sim_joint_name in sim_joint_names:
-        sim_joint_index = sim_joint_names.index(sim_joint_name)
-        assert sim_joint_name in wbc_joints_order, f"Joint {sim_joint_name} not found in loco_manip_g1_joints_order"
+    for sim_joint_index, sim_joint_name in enumerate(sim_joint_names):
+        if sim_joint_name not in wbc_joints_order:
+            # A sim joint outside the WBC's fixed joint set (e.g. a gripper the WBC doesn't
+            # model, such as the Dex1) simply doesn't contribute to its observation -- mirrors
+            # postprocess_actions' handling of the reverse direction (a WBC joint missing from
+            # the sim asset).
+            continue
         wbc_joint_index = wbc_joints_order[sim_joint_name]
         wbc_joint_data[:, wbc_joint_index] = sim_joint_data[:, sim_joint_index]
     return wbc_joint_data
@@ -65,7 +69,10 @@ def prepare_observations(
     sim_joint_pos = wp.to_torch(robot_data.joint_pos).cpu().numpy()
     sim_joint_vel = wp.to_torch(robot_data.joint_vel).cpu().numpy()
     sim_default_joint_pos = wp.to_torch(robot_data.default_joint_pos).cpu().numpy()
-    num_joints = len(robot_data.joint_names)
+    # The WBC's own fixed joint count, not the sim robot's -- they can differ (e.g. the
+    # Dex1 gripper has fewer real joints than the dexterous hand the WBC's joint order was
+    # built for), and wbc_joint_pos/vel/default_pos below are always sized to this count.
+    num_joints = len(wbc_joints_order)
 
     # Convert joints data from Lab's order to GR00T's order saved in config yaml
     wbc_joint_pos = np.zeros((num_envs, num_joints))
@@ -134,7 +141,10 @@ def postprocess_actions(
     # Convert wbc gr00t joints order to Lab joints order
     for wbc_joint_name, wbc_joint_index in wbc_g1_joints_order.items():
         if wbc_joint_name not in robot_data.joint_names:
-            print(f"Joint {wbc_joint_name} not found in asset")
+            # Expected for any embodiment whose gripper doesn't cover every joint in the
+            # WBC's fixed joint set (e.g. the Dex1's 2 fingers vs. the dexterous hand's 7) --
+            # this runs every step, so skip silently rather than logging per-step noise.
+            # print(f"Joint {wbc_joint_name} not found in asset")
             continue
         sim_joint_index = robot_data.joint_names.index(wbc_joint_name)
         processed_actions[:, sim_joint_index] = wbc_joints_pos_action[:, wbc_joint_index]
