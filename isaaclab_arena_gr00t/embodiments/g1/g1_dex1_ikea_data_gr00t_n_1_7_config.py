@@ -27,7 +27,7 @@ g1_dex1_ikea_config = {
         # hand). EndEffectorPose models a single end-effector pose, so each hand needs its own
         # modality key -- split via meta/modality.json's ee_action_left (0:6) / ee_action_right
         # (6:12) joint groups, not one combined 12-D EEF key.
-        modality_keys=["ee_action_left", "ee_action_right", "hand_cmd"],
+        modality_keys=["ee_action_left", "ee_action_right", "hand_cmd", "navigate_cmd"],
         action_configs=[
             # ee_action_{left,right} is a Cartesian end-effector pose (position + xyz-Euler
             # orientation), not independent joint angles -- type=EEF makes relative<->absolute
@@ -49,6 +49,17 @@ g1_dex1_ikea_config = {
                 format=ActionFormat.XYZ_EULER,
                 state_key="ee_state_right",
             ),
+            ActionConfig(
+                rep=ActionRepresentation.ABSOLUTE,
+                type=ActionType.NON_EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+            # navigate_cmd (body-frame [lin_vel_x, lin_vel_y, ang_vel_z]) is not a pose at all,
+            # so it's ABSOLUTE/NON_EEF/DEFAULT like hand_cmd -- there's no "relative to a
+            # reference state" notion for a velocity command, and no state_key counterpart to
+            # be relative to. See build_episode_actions_npz.py's _build_navigate_cmd for how
+            # it's derived, and write_navigate_cmd_column.py for how it got into the dataset
+            # (this column doesn't exist in the raw BitRobot recording).
             ActionConfig(
                 rep=ActionRepresentation.ABSOLUTE,
                 type=ActionType.NON_EEF,

@@ -33,9 +33,15 @@ _DATASET_ROOT = Path(
     "/mnt/ata-Samsung_SSD_870_QVO_8TB_S5SSNF0W200198W/lerobot_cache/BitRobot/G1_WBT_Dex1_Building-Children-Table"
 )
 _DATASET_FPS = 30.0
-# Root-pose finite differences use a wider-than-1-frame span: action.robot_q_desired's root
-# pose only updates every ~3 frames in the raw recording (holds stale values between updates),
-# so a naive 1-frame difference produces a velocity signal that pulses to zero every 3rd frame.
+# Root-pose finite differences use a wider-than-1-frame span rather than a naive 1-frame
+# difference. Originally justified as working around action.robot_q_desired holding stale
+# values for ~3 frames between updates -- but validate_navigate_cmd.py's dataset-wide run
+# (see its report) measured a mean stale-run length of ~1.0003 frames, i.e. the root pose
+# changes almost every single frame; that "~3 frames" was a one-episode observation, not a
+# real recording artifact. Kept at 5 anyway since it's a cheap, harmless smoothing window (long
+# genuine stationary holds during manipulation -- up to 99 frames, seen in 9/533 episodes --
+# still correctly average to ~0 velocity within it) and re-validating a narrower span isn't
+# worth the churn.
 _VELOCITY_SPAN_FRAMES = 5
 
 
@@ -44,13 +50,20 @@ def _build_navigate_cmd(q_desired: np.ndarray) -> np.ndarray:
     root_pos = q_desired[:, 0:3].copy()
     root_quat_wxyz = q_desired[:, 3:7].copy()
 
-    # A handful of frames (seen: just frame 0) carry an all-zero placeholder quaternion;
-    # fall back to the nearest valid neighbor so scipy doesn't choke on a zero-norm quat.
+    # A handful of frames carry an all-zero placeholder quaternion; fall back to the nearest
+    # valid frame (by absolute distance, searched among all valid frames -- not just the
+    # immediate neighbor) so scipy doesn't choke on a zero-norm quat. A neighbor-only fallback
+    # breaks on consecutive bad runs: fixing bad_idx from bad_idx+1 before bad_idx+1 has itself
+    # been fixed just copies another zero (seen dataset-wide, e.g. episode_000023 has frames
+    # 0 and 1 both zero).
     norms = np.linalg.norm(root_quat_wxyz, axis=1)
-    for bad_idx in np.where(norms < 1e-6)[0]:
-        neighbor = bad_idx + 1 if bad_idx + 1 < len(root_quat_wxyz) else bad_idx - 1
-        root_quat_wxyz[bad_idx] = root_quat_wxyz[neighbor]
-        root_pos[bad_idx] = root_pos[neighbor]
+    valid_mask = norms >= 1e-6
+    if not valid_mask.all():
+        valid_idx = np.where(valid_mask)[0]
+        for bad_idx in np.where(~valid_mask)[0]:
+            nearest = valid_idx[np.argmin(np.abs(valid_idx - bad_idx))]
+            root_quat_wxyz[bad_idx] = root_quat_wxyz[nearest]
+            root_pos[bad_idx] = root_pos[nearest]
 
     root_quat_xyzw = root_quat_wxyz[:, [1, 2, 3, 0]]
     rotations = R.from_quat(root_quat_xyzw)

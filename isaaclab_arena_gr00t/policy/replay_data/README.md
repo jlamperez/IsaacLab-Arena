@@ -31,6 +31,28 @@ tracked; the data they produce (`*.npz`, `debug_chunks/`) is gitignored and rege
   directly; `validate_eef_xyz_euler_pipeline.py` goes through `StateActionProcessor` itself, so it
   also exercises the real `XYZ_EULER` format end-to-end, not just the composition math in isolation.
 
+- **`validate_navigate_cmd.py`** — re-derives `navigate_cmd` (via `build_episode_actions_npz.py`'s
+  own `_build_navigate_cmd`, unmodified) for all 533 episodes and reports pooled ranges, NaN/Inf,
+  velocity outliers, and how often two assumptions baked into that function actually hold dataset-
+  wide (the zero-placeholder quaternion appearing outside frame 0; the stale-hold run length the
+  `_VELOCITY_SPAN_FRAMES` window is sized around). Written after a dataset-wide run surfaced a real
+  bug: the zero-quaternion fallback only handled isolated bad frames, and broke (`ValueError: Found
+  zero norm quaternions`) on `episode_000023`/`episode_000249`, which each have two consecutive
+  zero-quaternion frames -- fixed in `_build_navigate_cmd` by searching for the nearest valid frame
+  by absolute distance instead of only checking the immediate neighbor. Read-only; writes a summary
+  JSON next to this script (gitignored).
+
+  `validate_episode()` computes one dict per episode: quaternion-norm check (`zero_quat_idx`,
+  `zero_quat_only_at_frame0`), the stale-hold run-length distribution (`_stale_hold_run_lengths()`,
+  `max_stale_run_length`/`mean_stale_run_length`), the derived `navigate_cmd`'s own per-episode
+  `navigate_cmd_min`/`navigate_cmd_max`, `has_nan`/`has_inf`, and `n_outlier_frames` (frames past
+  `_OUTLIER_LIN_VEL`/`_OUTLIER_ANG_VEL`). `main()` then concatenates every episode's `navigate_cmd`
+  array into one `(n_frames_total, 3)` array and reduces it with plain `ndarray.min/max/mean/std(axis=0)`
+  for the dataset-wide `pooled_min`/`pooled_max`/`pooled_mean`/`pooled_std`, plus the episode lists
+  (`episodes_with_zero_quat_beyond_frame0`, `episodes_with_nan_or_inf`,
+  `episodes_with_stale_run_exceeding_span`, `top_outlier_episodes`) and the full per-episode
+  `episodes` array, all written to `navigate_cmd_validation.json`.
+
 ## Why these are separate from the dataset cache
 
 `meta/modality.json` and `meta/relative_stats.json` live in the dataset cache

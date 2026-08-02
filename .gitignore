@@ -84,6 +84,7 @@ TAGS
 
 # Cached/generated data under replay_data/ -- the scripts themselves ARE tracked.
 /isaaclab_arena_gr00t/policy/replay_data/*.npz
+/isaaclab_arena_gr00t/policy/replay_data/*.json
 /isaaclab_arena_gr00t/policy/replay_data/debug_chunks/
 /isaaclab_arena_gr00t/policy/replay_data/__pycache__/
 
