@@ -141,6 +141,20 @@ class Gr00tRemoteClosedloopPolicy(PolicyBase[Gr00tRemoteClosedloopPolicyCfg]):
     def get_action(self, env: gym.Env, observation: dict[str, Any]) -> torch.Tensor:
         assert self._chunking_state is not None, "GR00T remote policy has been closed"
 
+        import os
+
+        if os.environ.get("GR00T_DEBUG_SAVE_CAM"):
+            try:
+                from PIL import Image
+
+                pov_cam = self.policy_config.pov_cam_name_sim
+                pov_cam = pov_cam[0] if isinstance(pov_cam, list) else pov_cam
+                cam_step = observation["camera_obs"][pov_cam][0].detach().cpu().numpy()
+                self._debug_step_count = getattr(self, "_debug_step_count", 0) + 1
+                Image.fromarray(cam_step).save(f"/tmp/static_apple_cam0_perstep_{self._debug_step_count:04d}.png")
+            except Exception as e:  # noqa: BLE001
+                print(f"[static_apple_debug] failed to save per-step debug camera frame: {e}")
+
         def fetch_chunk() -> torch.Tensor:
             return self._get_action_chunk(observation, self.policy_config.pov_cam_name_sim)
 

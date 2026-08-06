@@ -157,9 +157,14 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # the table once actually placed, per Jorge. Backed off to x=0.02 (~0.59m to the
         # leg, ~15cm table clearance) -- still too close per Jorge. Backed off again to
         # x=-0.05 (~0.65m to the leg, ~22cm table clearance), keeping the 10 deg yaw.
+        # TEMPORARY, 2026-08-02: backed off ~0.35m in x from the tuned -0.05 above (Jorge:
+        # the tuned reach pose is too close for the "move to table" navigate_cmd test; the
+        # -1.25 first attempt lost the table from camera view entirely -- this is a middle
+        # distance matching a reference photo framing) -- revert to (-0.05, -0.203, 0.78)
+        # for grasp-reach testing.
         embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(
             enable_cameras=cfg.enable_cameras,
-            initial_pose=Pose(position_xyz=(-0.05, -0.203, 0.78), rotation_xyzw=(0.0, 0.0, -0.08715574274765817, 0.9961946980917455)),
+            initial_pose=Pose(position_xyz=(0.0, -0.203, 0.78), rotation_xyzw=(0.0, 0.0, -0.08715574274765817, 0.9961946980917455)),
         )
         # Step 3: Place the support surface and the two assembly parts.
         # These poses are read directly out of the kit's own reference scene

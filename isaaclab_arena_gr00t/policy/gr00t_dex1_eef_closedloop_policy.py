@@ -315,6 +315,23 @@ class Gr00tDex1EEFClosedloopPolicy(PolicyBase[Gr00tDex1EEFClosedloopPolicyCfg]):
             print(f"[gr00t_dex1_debug] task_description (actually sent to GR00T): {self.task_description!r}")
             print(f"[gr00t_dex1_debug] ee_state (current, input to policy): {ee_state}")
             print(f"[gr00t_dex1_debug] hand_state (current, input to policy): {hand_state}")
+            # Ground-truth check for whether navigate_cmd is producing real stepping/base
+            # translation, vs. just a forward lean with the feet planted -- root_pos_w is
+            # the actual simulated pelvis pose, independent of what was commanded.
+            robot_asset = env.unwrapped.scene["robot"]
+            root_pos_w = robot_asset.data.root_pos_w[0].detach().cpu().numpy()
+            leg_joint_names = [
+                "left_hip_pitch_joint",
+                "left_knee_joint",
+                "left_ankle_pitch_joint",
+                "right_hip_pitch_joint",
+                "right_knee_joint",
+                "right_ankle_pitch_joint",
+            ]
+            leg_ids, _ = robot_asset.find_joints(leg_joint_names)
+            leg_joint_pos = robot_asset.data.joint_pos[0, leg_ids].detach().cpu().numpy()
+            print(f"[gr00t_dex1_debug] root_pos_w (actual pelvis world pos): {root_pos_w}")
+            print(f"[gr00t_dex1_debug] leg_joint_pos {leg_joint_names}: {leg_joint_pos}")
             try:
                 from PIL import Image
 
@@ -341,18 +358,25 @@ class Gr00tDex1EEFClosedloopPolicy(PolicyBase[Gr00tDex1EEFClosedloopPolicyCfg]):
         ee_action_right = np.asarray(action_dict["ee_action_right"])[0]  # (horizon, 6)
         ee_action = np.concatenate([ee_action_left, ee_action_right], axis=1)  # (horizon, 12)
         hand_cmd = np.asarray(action_dict["hand_cmd"])[0]  # (horizon, 2)
+        # body-frame [lin_vel_x, lin_vel_y, ang_vel_z] (m/s, m/s, rad/s), same convention as
+        # replay_data/build_episode_actions_npz.py's _build_navigate_cmd training target.
+        navigate_cmd = np.asarray(action_dict["navigate_cmd"])[0]  # (horizon, 3)
         horizon = ee_action.shape[0]
 
         if _DEBUG:
             print(f"[gr00t_dex1_debug] ee_action[0] (predicted, first step of chunk): {ee_action[0]}")
             print(f"[gr00t_dex1_debug] ee_action min/max per-dim: {ee_action.min(axis=0)} / {ee_action.max(axis=0)}")
             print(f"[gr00t_dex1_debug] hand_cmd[0]: {hand_cmd[0]}")
+            print(f"[gr00t_dex1_debug] navigate_cmd[0]: {navigate_cmd[0]}")
             np.savez(
                 f"/tmp/gr00t_dex1_chunk_{self._debug_frame_count:03d}.npz",
                 ee_state=ee_state,
                 hand_state=hand_state,
+                root_pos_w=root_pos_w,
+                leg_joint_pos=leg_joint_pos,
                 ee_action=ee_action,
                 hand_cmd=hand_cmd,
+                navigate_cmd=navigate_cmd,
                 task_description=self.task_description,
             )
 
@@ -364,7 +388,7 @@ class Gr00tDex1EEFClosedloopPolicy(PolicyBase[Gr00tDex1EEFClosedloopPolicyCfg]):
         for t in range(horizon):
             actions[t, _LEFT_QUAT_SLICE] = _euler_xyz_to_quat_xyzw(ee_action[t, 3:6])
             actions[t, _RIGHT_QUAT_SLICE] = _euler_xyz_to_quat_xyzw(ee_action[t, 9:12])
-        actions[:, _NAVIGATE_SLICE] = 0.0
+        actions[:, _NAVIGATE_SLICE] = navigate_cmd
         actions[:, _BASE_HEIGHT_IDX] = _DEFAULT_BASE_HEIGHT
         actions[:, _TORSO_RPY_SLICE] = 0.0
         # BitRobot hand_cmd: 0 (close) -> 5.5 (open). Arena's BinaryJointPositionActionCfg
