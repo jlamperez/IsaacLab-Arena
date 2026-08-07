@@ -239,9 +239,17 @@
     border-radius: var(--radius-sm);
     display: inline-block;
   }
+  #cameraGrid { display: flex; gap: 12px; flex-wrap: wrap; }
+  .camera-cell { display: flex; flex-direction: column; gap: 4px; }
+  .camera-cell-label {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    color: var(--text-faint);
+    text-align: center;
+  }
   /* Native resolution: cameras are recorded at 224x224 (env_args' camera_cfg), no upscaling. */
-  #frameImg {
-    width: min(224px, 100%);
+  .camera-cell img {
+    width: 224px;
     image-rendering: pixelated;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -310,7 +318,7 @@
     <div class="panel" id="cameraPanel" style="display:none">
       <h3>Camera</h3>
       <div class="path" id="cameraPath"></div>
-      <img id="frameImg" />
+      <div id="cameraGrid"></div>
       <div class="row">
         <button id="playBtn">Play</button>
         <button id="prevFrameBtn" title="Previous frame">&laquo; Prev</button>
@@ -568,7 +576,7 @@ function renderNode(node, topLevel, query) {
 // --- Camera panel ---
 const cameraPanel = document.getElementById('cameraPanel');
 const cameraPath = document.getElementById('cameraPath');
-const frameImg = document.getElementById('frameImg');
+const cameraGrid = document.getElementById('cameraGrid');
 const frameSlider = document.getElementById('frameSlider');
 const frameLabel = document.getElementById('frameLabel');
 const playBtn = document.getElementById('playBtn');
@@ -576,19 +584,53 @@ const prevFrameBtn = document.getElementById('prevFrameBtn');
 const nextFrameBtn = document.getElementById('nextFrameBtn');
 const fpsInput = document.getElementById('fpsInput');
 
-let cameraState = { path: null, numFrames: 0, index: 0, playing: false };
+let cameraState = { paths: [], imgEls: [], numFrames: 0, index: 0, playing: false };
+
+// Finds every camera dataset alongside `path` in the same group (e.g. "obs" has
+// first_person_camera_rgb/left_hand_camera_rgb/right_hand_camera_rgb as siblings) so clicking any
+// one of them opens all views for that demo together instead of one at a time. Walks by node name
+// like findNode() rather than relying on _fullPath, since the tree here may be freshly fetched.
+function siblingCameraPaths(tree, path) {
+  const parts = path.split('/');
+  const parentParts = parts.slice(0, -1);
+  let parent = tree;
+  for (const part of parentParts) {
+    parent = parent.children.find((c) => c.name === part);
+    if (!parent) return [path];
+  }
+  if (!parent.children) return [path];
+  const siblings = parent.children.filter(isCameraDataset).map((c) => [...parentParts, c.name].join('/'));
+  return siblings.length > 0 ? siblings : [path];
+}
 
 async function selectCamera(path) {
   document.getElementById('emptyHint').style.display = 'none';
-  const tree = await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`);
+  const tree = currentTreeData || (await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`));
   const node = findNode(tree, path);
+  const paths = siblingCameraPaths(tree, path);
   stopPlayback();
-  cameraState = { path, numFrames: node.shape[0], index: 0, playing: false };
+  cameraState = { paths, imgEls: [], numFrames: node.shape[0], index: 0, playing: false };
   cameraPanel.style.display = '';
-  cameraPath.textContent = path;
+  cameraPath.textContent = paths[0].split('/').slice(0, -1).join('/') || paths[0];
   frameSlider.max = String(node.shape[0] - 1);
   frameSlider.value = '0';
+  renderCameraGrid();
   renderFrame();
+}
+
+function renderCameraGrid() {
+  cameraGrid.innerHTML = '';
+  cameraState.imgEls = cameraState.paths.map((path) => {
+    const cell = document.createElement('div');
+    cell.className = 'camera-cell';
+    const label = document.createElement('div');
+    label.className = 'camera-cell-label';
+    label.textContent = path.split('/').pop();
+    const img = document.createElement('img');
+    cell.append(label, img);
+    cameraGrid.appendChild(cell);
+    return img;
+  });
 }
 
 function findNode(tree, path) {
@@ -606,8 +648,10 @@ function frameUrl(path, index) {
 }
 
 function renderFrame() {
-  const { path, index } = cameraState;
-  frameImg.src = frameUrl(path, index);
+  const { paths, imgEls, index } = cameraState;
+  paths.forEach((path, i) => {
+    imgEls[i].src = frameUrl(path, index);
+  });
   frameLabel.textContent = `${index} / ${cameraState.numFrames - 1}`;
   frameSlider.value = String(index);
 }
@@ -633,33 +677,32 @@ function stopPlayback() {
   playBtn.textContent = 'Play';
 }
 
-// Timer-driven playback would keep reassigning frameImg.src every tick regardless of whether the
-// previous frame finished loading; the browser then aborts the in-flight request each time a new
-// src is set, so with per-frame latency above the tick interval the image never advances past the
-// first frame. Instead, each step waits for its frame to actually load before scheduling the next
-// one, adapting to real fetch latency instead of freezing.
+// Timer-driven playback would keep reassigning each <img>'s src every tick regardless of whether
+// the previous frame finished loading; the browser then aborts the in-flight request each time a
+// new src is set, so with per-frame latency above the tick interval the images never advance past
+// the first frame. Instead, each step waits for *all* cameras' frames to load (in parallel) before
+// scheduling the next one, adapting to real fetch latency and keeping every view in sync.
 function schedulePlaybackStep() {
   if (!cameraState.playing) return;
   const fps = Math.max(1, Number(fpsInput.value) || 15);
   const targetIntervalMs = 1000 / fps;
-  const { path, index } = cameraState;
+  const { paths, index } = cameraState;
   const start = performance.now();
-  const preloadImg = new Image();
-  const advance = () => {
+  const loaders = paths.map((path) => new Promise((resolve) => {
+    const preloadImg = new Image();
+    preloadImg.onload = () => resolve(preloadImg.src);
+    preloadImg.onerror = () => resolve(null); // skip a frame that failed rather than getting stuck
+    preloadImg.src = frameUrl(path, index);
+  }));
+  Promise.all(loaders).then((srcs) => {
     if (!cameraState.playing) return;
+    srcs.forEach((src, i) => { if (src) cameraState.imgEls[i].src = src; });
+    frameLabel.textContent = `${index} / ${cameraState.numFrames - 1}`;
+    frameSlider.value = String(index);
     cameraState.index = (index + 1) % cameraState.numFrames;
     const elapsed = performance.now() - start;
     setTimeout(schedulePlaybackStep, Math.max(0, targetIntervalMs - elapsed));
-  };
-  preloadImg.onload = () => {
-    if (!cameraState.playing) return;
-    frameImg.src = preloadImg.src;
-    frameLabel.textContent = `${index} / ${cameraState.numFrames - 1}`;
-    frameSlider.value = String(index);
-    advance();
-  };
-  preloadImg.onerror = advance; // skip a frame that failed to load rather than getting stuck
-  preloadImg.src = frameUrl(path, index);
+  });
 }
 
 playBtn.addEventListener('click', () => {
