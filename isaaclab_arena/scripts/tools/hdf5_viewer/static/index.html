@@ -207,6 +207,22 @@
     text-overflow: ellipsis;
   }
   .node-attrs { color: var(--text-muted); font-size: 11px; padding: 0 6px 4px 24px; }
+  .attr-link { color: var(--accent); cursor: pointer; }
+  .attr-link:hover { text-decoration: underline; }
+  #attrsContent {
+    margin: 0;
+    max-height: 480px;
+    overflow: auto;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+  }
   .collapsed > ul.node-children { display: none; }
   .badge { font-size: 9.5px; font-weight: 700; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 999px; }
   .badge-camera { background: var(--badge-camera-bg); color: var(--badge-camera-fg); }
@@ -244,7 +260,11 @@
     padding: 8px 10px;
     border-radius: var(--radius-sm);
   }
-  #seriesCanvas { width: 100%; height: 240px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-alt); cursor: crosshair; }
+  .series-body { display: flex; gap: 12px; align-items: flex-start; }
+  #seriesCanvas { flex: 1; min-width: 0; height: 240px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-alt); cursor: crosshair; }
+  .series-legend-wrap { width: 240px; flex-shrink: 0; }
+  .series-legend-toolbar { display: flex; gap: 10px; margin-bottom: 6px; font-size: 11px; }
+  #seriesHint { color: var(--text-muted); font-size: 11px; margin-bottom: 6px; }
   #seriesTooltip {
     position: fixed;
     display: none;
@@ -259,8 +279,12 @@
     z-index: 10;
     white-space: nowrap;
   }
-  #seriesLegend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: 11px; color: var(--text-muted); }
-  #seriesLegend span.swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }
+  #seriesLegend { display: flex; flex-direction: column; gap: 1px; max-height: 240px; overflow-y: auto; font-size: 11px; color: var(--text-muted); }
+  #seriesLegend label { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+  #seriesLegend label:hover { background: var(--accent-soft); }
+  #seriesLegend input[type=checkbox] { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+  #seriesLegend span.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  #seriesLegend span.label-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty-hint { color: var(--text-faint); padding: 24px; text-align: center; }
 </style>
 </head>
@@ -304,8 +328,22 @@
     <div class="panel" id="seriesPanel" style="display:none">
       <h3>Signal</h3>
       <div class="path" id="seriesPath"></div>
-      <canvas id="seriesCanvas"></canvas>
-      <div id="seriesLegend"></div>
+      <div class="series-body">
+        <canvas id="seriesCanvas"></canvas>
+        <div class="series-legend-wrap">
+          <div class="series-legend-toolbar">
+            <span class="attr-link" id="legendAllBtn">All</span>
+            <span class="attr-link" id="legendNoneBtn">None</span>
+          </div>
+          <div id="seriesHint"></div>
+          <div id="seriesLegend"></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="attrsPanel" style="display:none">
+      <h3>Attribute</h3>
+      <div class="path" id="attrsPath"></div>
+      <pre id="attrsContent"></pre>
     </div>
     <div class="empty-hint" id="emptyHint">Click a camera dataset (obs/*_camera_rgb) to play it back, or a numeric dataset (actions, joint_targets/*, raw_action/*, raw_input/*, ...) to plot it.</div>
   </div>
@@ -423,13 +461,25 @@ function isSeriesDataset(node) {
   return node.shape.length >= 1 && node.shape.length <= 2 && numericKinds.includes(node.dtype);
 }
 
+// Long string attrs (e.g. "data".env_args, a big JSON blob of the full env/camera/action config)
+// would make the tree row unreadable if inlined -- summarize short attrs there, and expose long
+// ones as a separate "view" link instead (see largeAttrKeys() + selectAttr()).
+const ATTR_INLINE_MAX_LEN = 80;
+
+function isLargeAttr(value) {
+  return typeof value === 'string' && value.length > ATTR_INLINE_MAX_LEN;
+}
+
 function attrsSummary(attrs) {
   const keys = Object.keys(attrs || {});
-  if (keys.length === 0) return '';
   return keys
-    .filter((k) => k !== 'env_args') // env_args is a large JSON blob, too noisy for the tree row
+    .filter((k) => !isLargeAttr(attrs[k]))
     .map((k) => `${k}=${JSON.stringify(attrs[k])}`)
     .join(', ');
+}
+
+function largeAttrKeys(attrs) {
+  return Object.keys(attrs || {}).filter((k) => isLargeAttr(attrs[k]));
 }
 
 function renderNode(node, topLevel, query) {
@@ -490,6 +540,17 @@ function renderNode(node, topLevel, query) {
     attrsEl.className = 'node-attrs';
     attrsEl.textContent = attrsText;
     li.appendChild(attrsEl);
+  }
+
+  for (const key of largeAttrKeys(node.attrs)) {
+    const wrap = document.createElement('div');
+    wrap.className = 'node-attrs';
+    const link = document.createElement('span');
+    link.className = 'attr-link';
+    link.textContent = `▸ view ${key} (${node.attrs[key].length.toLocaleString()} chars)`;
+    link.addEventListener('click', () => selectAttr(node._fullPath, key, node.attrs[key]));
+    wrap.appendChild(link);
+    li.appendChild(wrap);
   }
 
   if (node.type === 'group' && node.children) {
@@ -616,6 +677,9 @@ const seriesPanel = document.getElementById('seriesPanel');
 const seriesPathEl = document.getElementById('seriesPath');
 const seriesCanvas = document.getElementById('seriesCanvas');
 const seriesLegend = document.getElementById('seriesLegend');
+const seriesHint = document.getElementById('seriesHint');
+const legendAllBtn = document.getElementById('legendAllBtn');
+const legendNoneBtn = document.getElementById('legendNoneBtn');
 const seriesTooltip = document.getElementById('seriesTooltip');
 
 // Set by drawSeries() to whatever it needs to map a mouse position back to a data value; read by
@@ -633,8 +697,8 @@ seriesCanvas.addEventListener('mousemove', (e) => {
   const rect = seriesCanvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
-  const { rows, numCols, singleSample, pad, w } = chartLayout;
-  if (mx < pad || mx > w - 4) {
+  const { rows, numCols, singleSample, pad, w, labels, visible } = chartLayout;
+  if (mx < pad || mx > w - 4 || visible.size === 0) {
     seriesTooltip.style.display = 'none';
     return;
   }
@@ -643,17 +707,23 @@ seriesCanvas.addEventListener('mousemove', (e) => {
 
   let text;
   if (singleSample) {
-    text = `col ${idx}: ${rows[0][idx].toFixed(4)}`;
+    if (!visible.has(idx)) { seriesTooltip.style.display = 'none'; return; }
+    const label = labels ? labels[idx] : `col ${idx}`;
+    text = `${label}: ${rows[0][idx].toFixed(4)}`;
   } else {
     // Several columns can share the same time step (e.g. all 132 joint_targets columns) -- pick
-    // whichever column's line is vertically closest to the cursor rather than listing them all.
+    // whichever *visible* column's line is vertically closest to the cursor, ignoring ones hidden
+    // via the checklist rather than listing them all.
     const row = rows[idx];
-    let bestCol = 0, bestDist = Infinity;
+    let bestCol = -1, bestDist = Infinity;
     for (let c = 0; c < numCols; c++) {
+      if (!visible.has(c)) continue;
       const dist = Math.abs(chartYScale(row[c]) - my);
       if (dist < bestDist) { bestDist = dist; bestCol = c; }
     }
-    text = numCols > 1 ? `t=${idx}, col ${bestCol}: ${row[bestCol].toFixed(4)}` : `t=${idx}: ${row[0].toFixed(4)}`;
+    if (bestCol === -1) { seriesTooltip.style.display = 'none'; return; }
+    const label = labels ? labels[bestCol] : `col ${bestCol}`;
+    text = numCols > 1 ? `t=${idx}, ${label}: ${row[bestCol].toFixed(4)}` : `t=${idx}: ${row[0].toFixed(4)}`;
   }
   seriesTooltip.textContent = text;
   seriesTooltip.style.display = 'block';
@@ -665,17 +735,152 @@ seriesCanvas.addEventListener('mouseleave', () => {
   seriesTooltip.style.display = 'none';
 });
 
+// --- Column labels derived from env_args.action_space_definition ---
+// Parsed once per file from the "data" group's env_args attr (the same blob the "view env_args"
+// link shows raw); memoized so switching between datasets in the same file doesn't re-parse it.
+let envArgsCache = { file: null, parsed: null };
+
+function getEnvArgs() {
+  if (!currentTreeData) return null;
+  if (envArgsCache.file === currentFile) return envArgsCache.parsed;
+  const dataNode = (currentTreeData.children || []).find((c) => c.name === 'data');
+  let parsed = null;
+  if (dataNode && dataNode.attrs && dataNode.attrs.env_args) {
+    try {
+      parsed = JSON.parse(dataNode.attrs.env_args);
+    } catch (e) {
+      parsed = null;
+    }
+  }
+  envArgsCache = { file: currentFile, parsed };
+  return parsed;
+}
+
+function findActionDef(envArgs, name) {
+  return (envArgs.action_space_definition || []).find((d) => d.action_name === name) || null;
+}
+
+// The top-level per-demo "actions" dataset (23 columns) turns out to be base_action's
+// action_content list verbatim, in order -- NOT a concatenation with left_hand_action/
+// right_hand_action (those apparently land in a different dataset, e.g. processed_actions).
+// Verified against real values, not just the schema: cols 2-8 and 9-15 each have one component
+// sitting at ~0.99-1.0 with the other three satisfying qx^2+qy^2+qz^2 ~= 1-qw^2 (a near-identity
+// quaternion), matching "..._qw,qx,qy,qz"; col 19 sits at a constant ~0.74, plausible as a G1's
+// commanded pelvis height ("base_height_cmd"); cols 20-22 sit at a constant 0 ("torso_ori_*").
+function actionColumnLabels(envArgs, numCols) {
+  const base = findActionDef(envArgs, 'base_action');
+  if (!base || !Array.isArray(base.action_content)) return null;
+  return base.action_content.length === numCols ? base.action_content : null;
+}
+
+// joint_position/joint_velocity under initial_state/articulation/robot are the sim's raw per-DOF
+// articulation state (33 columns). base_action's applied_joint_ids is the identity permutation
+// 0..32 over ALL of the robot's joints (not a subset or reorder), so its applied_joint_names is
+// the exact per-index joint name for these buffers too, not just for the action it names.
+function jointStateColumnLabels(envArgs, numCols) {
+  const base = findActionDef(envArgs, 'base_action');
+  if (!base || !Array.isArray(base.applied_joint_names)) return null;
+  return base.applied_joint_names.length === numCols ? base.applied_joint_names : null;
+}
+
+function getColumnLabels(path, numCols) {
+  const envArgs = getEnvArgs();
+  if (!envArgs) return null;
+  if (path.endsWith('/actions')) return actionColumnLabels(envArgs, numCols);
+  if (path.endsWith('/joint_position') || path.endsWith('/joint_velocity')) {
+    return jointStateColumnLabels(envArgs, numCols);
+  }
+  return null;
+}
+
 async function selectSeries(path) {
   document.getElementById('emptyHint').style.display = 'none';
   const data = await fetchJson(`/api/series?file=${encodeURIComponent(currentFile)}&path=${encodeURIComponent(path)}`);
   seriesPanel.style.display = '';
   seriesPathEl.textContent = `${path}  (shape ${data.shape.join('x')}, ${data.dtype})`;
-  drawSeries(data.data);
+  const numCols = data.shape.length > 1 ? data.shape[1] : 1;
+  drawSeries(data.data, getColumnLabels(path, numCols));
 }
 
-function drawSeries(data) {
+// --- Attribute panel (e.g. "data".env_args) ---
+const attrsPanel = document.getElementById('attrsPanel');
+const attrsPathEl = document.getElementById('attrsPath');
+const attrsContent = document.getElementById('attrsContent');
+
+function selectAttr(path, key, rawValue) {
+  document.getElementById('emptyHint').style.display = 'none';
+  attrsPanel.style.display = '';
+  attrsPathEl.textContent = `${path} · ${key}`;
+  try {
+    attrsContent.textContent = JSON.stringify(JSON.parse(rawValue), null, 2);
+  } catch (e) {
+    attrsContent.textContent = rawValue; // not JSON -- show as-is
+  }
+}
+
+function seriesColor(c, numCols) {
+  return `hsl(${(c * 360) / numCols}, 70%, 45%)`;
+}
+
+// Entry point when a new dataset is selected: computes the data-derived layout once (min/max,
+// column count, single-sample vs trajectory) and builds the checkbox legend. Toggling a checkbox
+// afterwards only calls paintSeriesCanvas() -- no need to redo any of this.
+function drawSeries(data, labels) {
   const rows = Array.isArray(data[0]) ? data : data.map((v) => [v]);
   const numCols = rows[0].length;
+  let min = Infinity, max = -Infinity;
+  for (const row of rows) for (const v of row) { if (v < min) min = v; if (v > max) max = v; }
+  if (min === max) { min -= 1; max += 1; }
+  const singleSample = rows.length === 1;
+  // All columns start visible, matching the previous "draw everything" behavior; the checklist
+  // lets the user narrow it down from there instead of fighting an unreadable 23-line overlay.
+  const visible = new Set(Array.from({ length: numCols }, (_, c) => c));
+  chartLayout = { rows, numCols, singleSample, min, max, pad: 28, labels, visible, w: 0, h: 0 };
+
+  seriesHint.textContent = singleSample
+    ? 'Single sample -- each dot is one column, shown independently (no connecting line) since ' +
+      'adjacent columns are often unrelated quantities (e.g. xyz position then a quaternion).'
+    : '';
+
+  seriesLegend.innerHTML = '';
+  for (let c = 0; c < numCols; c++) {
+    const item = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) visible.add(c); else visible.delete(c);
+      paintSeriesCanvas();
+    });
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = seriesColor(c, numCols);
+    const text = document.createElement('span');
+    text.className = 'label-text';
+    text.textContent = labels ? labels[c] : `col ${c}`;
+    item.append(checkbox, swatch, text);
+    seriesLegend.appendChild(item);
+  }
+
+  paintSeriesCanvas();
+}
+
+legendAllBtn.addEventListener('click', () => {
+  if (!chartLayout) return;
+  for (let c = 0; c < chartLayout.numCols; c++) chartLayout.visible.add(c);
+  seriesLegend.querySelectorAll('input[type=checkbox]').forEach((cb) => (cb.checked = true));
+  paintSeriesCanvas();
+});
+legendNoneBtn.addEventListener('click', () => {
+  if (!chartLayout) return;
+  chartLayout.visible.clear();
+  seriesLegend.querySelectorAll('input[type=checkbox]').forEach((cb) => (cb.checked = false));
+  paintSeriesCanvas();
+});
+
+// Just the canvas painting, driven entirely by chartLayout -- re-run on every checkbox toggle.
+function paintSeriesCanvas() {
+  const { rows, numCols, singleSample, min, max, pad, visible } = chartLayout;
   const canvas = seriesCanvas;
   const rect = canvas.getBoundingClientRect();
   canvas.width = rect.width * devicePixelRatio;
@@ -684,14 +889,11 @@ function drawSeries(data) {
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   const w = rect.width, h = rect.height;
   ctx.clearRect(0, 0, w, h);
+  chartLayout.w = w;
+  chartLayout.h = h;
 
-  let min = Infinity, max = -Infinity;
-  for (const row of rows) for (const v of row) { if (v < min) min = v; if (v > max) max = v; }
-  if (min === max) { min -= 1; max += 1; }
-  const pad = 28;
   const xScale = (i) => pad + (i / Math.max(1, rows.length - 1)) * (w - pad - 8);
   const yScale = (v) => h - pad - ((v - min) / (max - min)) * (h - pad - 8);
-  chartLayout = { rows, numCols, singleSample: rows.length === 1, min, max, pad, w, h };
 
   ctx.strokeStyle = '#8884';
   ctx.beginPath();
@@ -702,14 +904,12 @@ function drawSeries(data) {
   ctx.fillText(max.toFixed(3), 2, 12);
   ctx.fillText(min.toFixed(3), 2, h - pad + 4);
 
-  seriesLegend.innerHTML = '';
-
   // A single row (e.g. initial_state/* -- one snapshot, not a trajectory) has no time axis to draw
   // a line across, and even if it did, adjacent columns here are often unrelated quantities (e.g.
   // root_pose is xyz position followed by a wxyz quaternion) -- connecting them with a line would
   // draw a fake trend between numbers that have nothing to do with each other. Render each column
   // as an independent lollipop (stem from zero + a dot) instead of a connected profile.
-  if (rows.length === 1) {
+  if (singleSample) {
     const values = rows[0];
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#6355e0';
     const colScale = (c) => pad + (c / Math.max(1, numCols - 1)) * (w - pad - 8);
@@ -717,6 +917,7 @@ function drawSeries(data) {
     ctx.strokeStyle = accent;
     ctx.lineWidth = 1.5;
     values.forEach((v, c) => {
+      if (!visible.has(c)) return;
       const x = colScale(c);
       ctx.beginPath();
       ctx.moveTo(x, baselineY);
@@ -726,36 +927,23 @@ function drawSeries(data) {
     ctx.lineWidth = 1;
     ctx.fillStyle = accent;
     values.forEach((v, c) => {
+      if (!visible.has(c)) return;
       ctx.beginPath();
       ctx.arc(colScale(c), yScale(v), 3, 0, Math.PI * 2);
       ctx.fill();
     });
-    seriesLegend.textContent = `Single sample (e.g. initial_state) -- each dot is one column (index 0-${numCols - 1}), shown independently since adjacent columns are often unrelated quantities (e.g. xyz position then a quaternion).`;
     return;
   }
 
-  const showLegend = numCols <= 24;
   for (let c = 0; c < numCols; c++) {
-    const color = `hsl(${(c * 360) / numCols}, 70%, 45%)`;
-    ctx.strokeStyle = color;
+    if (!visible.has(c)) continue;
+    ctx.strokeStyle = seriesColor(c, numCols);
     ctx.beginPath();
     rows.forEach((row, i) => {
       const x = xScale(i), y = yScale(row[c]);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
-    if (showLegend) {
-      const item = document.createElement('span');
-      const swatch = document.createElement('span');
-      swatch.className = 'swatch';
-      swatch.style.background = color;
-      item.appendChild(swatch);
-      item.appendChild(document.createTextNode(`col ${c}`));
-      seriesLegend.appendChild(item);
-    }
-  }
-  if (!showLegend) {
-    seriesLegend.textContent = `${numCols} columns (legend omitted)`;
   }
 }
 
