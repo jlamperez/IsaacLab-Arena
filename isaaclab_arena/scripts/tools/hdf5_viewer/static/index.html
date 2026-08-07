@@ -4,76 +4,284 @@
 <meta charset="utf-8" />
 <title>HDF5 Viewer</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f8;
+    --surface: #ffffff;
+    --surface-alt: #f7f7fb;
+    --border: rgba(15, 23, 42, 0.09);
+    --text: #16181d;
+    --text-muted: #6b7280;
+    --text-faint: #9aa1ac;
+    --accent: #6355e0;
+    --accent-soft: rgba(99, 85, 224, 0.12);
+    --accent-contrast: #ffffff;
+    --badge-camera-bg: rgba(99, 85, 224, 0.14);
+    --badge-camera-fg: #6355e0;
+    --badge-series-bg: rgba(16, 163, 127, 0.14);
+    --badge-series-fg: #0f9d76;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+    --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.06);
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1015;
+      --surface: #171a21;
+      --surface-alt: #12141a;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #e6e7ea;
+      --text-muted: #9aa0ac;
+      --text-faint: #6b7280;
+      --accent: #8b7dfb;
+      --accent-soft: rgba(139, 125, 251, 0.16);
+      --accent-contrast: #12141a;
+      --badge-camera-bg: rgba(139, 125, 251, 0.18);
+      --badge-camera-fg: #a79bfd;
+      --badge-series-bg: rgba(52, 211, 153, 0.16);
+      --badge-series-fg: #4ade80;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+    }
+  }
+  /* Explicit user choice (toggled via #themeToggle, persisted in localStorage) -- the attribute
+     selector below outranks the plain ":root" in the media-query block above regardless of source
+     order, so it wins even when it disagrees with the OS-level preference. */
+  :root[data-theme="dark"] {
+    --bg: #0e1015;
+    --surface: #171a21;
+    --surface-alt: #12141a;
+    --border: rgba(255, 255, 255, 0.08);
+    --text: #e6e7ea;
+    --text-muted: #9aa0ac;
+    --text-faint: #6b7280;
+    --accent: #8b7dfb;
+    --accent-soft: rgba(139, 125, 251, 0.16);
+    --accent-contrast: #12141a;
+    --badge-camera-bg: rgba(139, 125, 251, 0.18);
+    --badge-camera-fg: #a79bfd;
+    --badge-series-bg: rgba(52, 211, 153, 0.16);
+    --badge-series-fg: #4ade80;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f8;
+    --surface: #ffffff;
+    --surface-alt: #f7f7fb;
+    --border: rgba(15, 23, 42, 0.09);
+    --text: #16181d;
+    --text-muted: #6b7280;
+    --text-faint: #9aa1ac;
+    --accent: #6355e0;
+    --accent-soft: rgba(99, 85, 224, 0.12);
+    --accent-contrast: #ffffff;
+    --badge-camera-bg: rgba(99, 85, 224, 0.14);
+    --badge-camera-fg: #6355e0;
+    --badge-series-bg: rgba(16, 163, 127, 0.14);
+    --badge-series-fg: #0f9d76;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+    --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.06);
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
     display: flex;
     flex-direction: column;
     height: 100vh;
   }
   header {
-    padding: 8px 12px;
-    border-bottom: 1px solid #8884;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    z-index: 1;
+  }
+  header h1 {
+    font-size: 14px;
+    margin: 0;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  header h1 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  select, button, input[type=number], input[type=search] {
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+  }
+  select:hover, button:hover { border-color: var(--accent); }
+  select:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 1px; }
+  button { cursor: pointer; transition: filter 0.15s, border-color 0.15s, transform 0.05s; }
+  button:active { transform: translateY(1px); }
+  #playBtn { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); font-weight: 600; }
+  #playBtn:hover { filter: brightness(1.08); }
+  #fileSelect { min-width: 260px; }
+  #dirChip {
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: 8px;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    padding: 5px 12px;
+    border-radius: 999px;
+    max-width: 55%;
+    overflow: hidden;
   }
-  header select, header button {
-    font-size: 13px;
-    padding: 4px 8px;
+  #dirChip .dir-chip-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    flex-shrink: 0;
   }
-  #dirLabel { opacity: 0.6; margin-left: auto; }
+  #dirLabel {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   main {
     flex: 1;
     display: grid;
     grid-template-columns: 340px 1fr;
     min-height: 0;
   }
-  #tree {
-    overflow: auto;
-    border-right: 1px solid #8884;
-    padding: 8px;
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--surface-alt);
+    border-right: 1px solid var(--border);
   }
+  .sidebar-toolbar { padding: 8px; border-bottom: 1px solid var(--border); }
+  #treeFilter { width: 100%; }
+  #tree {
+    flex: 1;
+    overflow: auto;
+    padding: 10px;
+  }
+  #tree::-webkit-scrollbar, #panels::-webkit-scrollbar { width: 10px; }
+  #tree::-webkit-scrollbar-thumb, #panels::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
   #panels {
     overflow: auto;
-    padding: 12px;
+    padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 16px;
   }
-  ul.node-children { list-style: none; margin: 0; padding-left: 16px; }
-  li.node { margin: 2px 0; }
-  .node-row { display: flex; align-items: baseline; gap: 6px; cursor: default; }
+  ul.node-children { list-style: none; margin: 0 0 0 5px; padding-left: 14px; border-left: 1px solid var(--border); }
+  li.node { margin: 1px 0; }
+  .node-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 6px; border-radius: var(--radius-sm); cursor: default; }
+  .node-row:hover { background: var(--accent-soft); }
+  .chevron { display: inline-block; width: 10px; color: var(--text-faint); font-size: 9px; transition: transform 0.15s; }
+  .collapsed > .node-row .chevron { transform: rotate(-90deg); }
   .node-name { font-weight: 600; }
   .node-name.group { cursor: pointer; }
-  .node-name.clickable { cursor: pointer; color: #2b7de9; }
+  .node-name.clickable { cursor: pointer; color: var(--accent); }
   .node-name.clickable:hover { text-decoration: underline; }
-  .node-meta { opacity: 0.55; font-size: 11px; }
-  .node-attrs { opacity: 0.6; font-size: 11px; }
+  .node-meta {
+    display: block;
+    color: var(--text-faint);
+    font-size: 10.5px;
+    font-family: ui-monospace, Menlo, monospace;
+    padding: 0 6px 4px 24px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .node-attrs { color: var(--text-muted); font-size: 11px; padding: 0 6px 4px 24px; }
   .collapsed > ul.node-children { display: none; }
-  .panel { border: 1px solid #8884; border-radius: 6px; padding: 10px; }
-  .panel h3 { margin: 0 0 8px 0; font-size: 13px; }
-  .panel .path { font-family: monospace; opacity: 0.7; font-size: 11px; margin-bottom: 6px; word-break: break-all; }
+  .badge { font-size: 9.5px; font-weight: 700; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 999px; }
+  .badge-camera { background: var(--badge-camera-bg); color: var(--badge-camera-fg); }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-md); padding: 16px; }
+  .panel h3 { margin: 0 0 10px 0; font-size: 13px; }
+  .panel .path {
+    font-family: ui-monospace, Menlo, monospace;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 10px;
+    word-break: break-all;
+    background: var(--surface-alt);
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    display: inline-block;
+  }
   /* Native resolution: cameras are recorded at 224x224 (env_args' camera_cfg), no upscaling. */
-  #frameImg { width: min(224px, 100%); image-rendering: pixelated; border: 1px solid #8884; background: #0002; }
-  .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
-  #seriesCanvas { width: 100%; height: 240px; border: 1px solid #8884; }
-  #seriesLegend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; font-size: 11px; }
+  #frameImg {
+    width: min(224px, 100%);
+    image-rendering: pixelated;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-alt);
+    display: block;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  input[type=range] { accent-color: var(--accent); }
+  #frameLabel { font-family: ui-monospace, Menlo, monospace; color: var(--text-muted); font-size: 11.5px; }
+  .note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--surface-alt);
+    border-left: 3px solid var(--accent);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+  }
+  #seriesCanvas { width: 100%; height: 240px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-alt); cursor: crosshair; }
+  #seriesTooltip {
+    position: fixed;
+    display: none;
+    pointer-events: none;
+    background: var(--text);
+    color: var(--bg);
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    white-space: nowrap;
+  }
+  #seriesLegend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: 11px; color: var(--text-muted); }
   #seriesLegend span.swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }
-  .empty-hint { opacity: 0.5; padding: 20px; text-align: center; }
+  .empty-hint { color: var(--text-faint); padding: 24px; text-align: center; }
 </style>
 </head>
 <body>
 <header>
+  <h1><span class="dot"></span>HDF5 Viewer</h1>
   <select id="fileSelect"><option>Loading files...</option></select>
   <button id="refreshBtn">Refresh</button>
-  <span id="dirLabel"></span>
+  <div id="dirChip">
+    <span class="dir-chip-label">Path</span>
+    <span id="dirLabel"></span>
+  </div>
+  <button id="themeToggle" title="Toggle light/dark theme">🌙</button>
 </header>
 <main>
-  <div id="tree"><div class="empty-hint">Select a file to browse its structure.</div></div>
+  <div class="sidebar">
+    <div class="sidebar-toolbar">
+      <input type="search" id="treeFilter" placeholder="Filter nodes (e.g. camera, action)..." />
+    </div>
+    <div id="tree"><div class="empty-hint">Select a file to browse its structure.</div></div>
+  </div>
   <div id="panels">
     <div class="panel" id="cameraPanel" style="display:none">
       <h3>Camera</h3>
@@ -85,9 +293,9 @@
         <button id="nextFrameBtn" title="Next frame">Next &raquo;</button>
         <input type="range" id="frameSlider" min="0" max="0" value="0" style="flex:1" />
         <span id="frameLabel">0 / 0</span>
-        <label>fps <input type="number" id="fpsInput" value="50" min="1" max="60" style="width:48px" /></label>
+        <label>fps <input type="number" id="fpsInput" value="50" min="1" max="60" style="width:60px" /></label>
       </div>
-      <div class="node-attrs" style="margin-top:6px">
+      <div class="note">
         Recorded at 50Hz (env_args.sim_args: dt=0.005s &times; decimation=4). Cameras only refresh
         at 20Hz (update_period=0.05s), so consecutive recorded frames repeat the same image ~2-3
         times before it changes -- expected, not a bug.
@@ -102,7 +310,38 @@
     <div class="empty-hint" id="emptyHint">Click a camera dataset (obs/*_camera_rgb) to play it back, or a numeric dataset (actions, joint_targets/*, raw_action/*, raw_input/*, ...) to plot it.</div>
   </div>
 </main>
+<div id="seriesTooltip"></div>
 <script>
+// --- Theme toggle ---
+// Persists an explicit choice in localStorage via the :root[data-theme] CSS overrides; with no
+// stored choice yet, the page just follows the OS/browser's prefers-color-scheme as before.
+const THEME_STORAGE_KEY = 'hdf5-viewer-theme';
+const themeToggleBtn = document.getElementById('themeToggle');
+
+function getEffectiveTheme() {
+  return document.documentElement.dataset.theme
+    || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
+
+function updateThemeToggleLabel() {
+  const dark = getEffectiveTheme() === 'dark';
+  themeToggleBtn.textContent = dark ? '☀️' : '🌙';
+  themeToggleBtn.title = `Switch to ${dark ? 'light' : 'dark'} mode`;
+}
+
+const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+if (storedTheme === 'light' || storedTheme === 'dark') {
+  document.documentElement.dataset.theme = storedTheme;
+}
+updateThemeToggleLabel();
+
+themeToggleBtn.addEventListener('click', () => {
+  const next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem(THEME_STORAGE_KEY, next);
+  updateThemeToggleLabel();
+});
+
 const fileSelect = document.getElementById('fileSelect');
 const treeEl = document.getElementById('tree');
 const dirLabel = document.getElementById('dirLabel');
@@ -119,6 +358,7 @@ async function fetchJson(url) {
 async function loadFiles() {
   const data = await fetchJson('/api/files');
   dirLabel.textContent = data.dir;
+  document.getElementById('dirChip').title = data.dir;
   fileSelect.innerHTML = '';
   if (data.files.length === 0) {
     fileSelect.innerHTML = '<option>(no .hdf5 files found)</option>';
@@ -141,16 +381,35 @@ fileSelect.addEventListener('change', async () => {
 });
 document.getElementById('refreshBtn').addEventListener('click', loadFiles);
 
+let currentTreeData = null;
+const treeFilterInput = document.getElementById('treeFilter');
+
 async function loadTree() {
   treeEl.innerHTML = '<div class="empty-hint">Loading...</div>';
   try {
-    const tree = await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`);
-    treeEl.innerHTML = '';
-    treeEl.appendChild(renderNode(tree, true));
+    currentTreeData = await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`);
+    treeFilterInput.value = '';
+    renderTree();
   } catch (err) {
     treeEl.innerHTML = `<div class="empty-hint">Error loading tree: ${err.message}</div>`;
     throw err;
   }
+}
+
+function renderTree() {
+  if (!currentTreeData) return;
+  const query = treeFilterInput.value.trim().toLowerCase();
+  treeEl.innerHTML = '';
+  treeEl.appendChild(renderNode(currentTreeData, true, query));
+}
+
+treeFilterInput.addEventListener('input', renderTree);
+
+// Matches on the node's own name only (not full path) -- cheap and good enough since HDF5 group/
+// dataset names in this dataset are already descriptive (e.g. "first_person_camera_rgb").
+function nodeMatchesQuery(node, query) {
+  if (node.name.toLowerCase().includes(query)) return true;
+  return (node.children || []).some((c) => nodeMatchesQuery(c, query));
 }
 
 function isCameraDataset(node) {
@@ -173,11 +432,21 @@ function attrsSummary(attrs) {
     .join(', ');
 }
 
-function renderNode(node, topLevel) {
+function renderNode(node, topLevel, query) {
   const li = document.createElement('li');
   li.className = 'node';
+  const matches = !query || nodeMatchesQuery(node, query);
+  if (!matches) li.style.display = 'none';
+
   const row = document.createElement('div');
   row.className = 'node-row';
+
+  if (node.type === 'group') {
+    const chevron = document.createElement('span');
+    chevron.className = 'chevron';
+    chevron.textContent = '▾'; // rotated via CSS when collapsed
+    row.appendChild(chevron);
+  }
 
   const nameEl = document.createElement('span');
   nameEl.textContent = node.name;
@@ -185,10 +454,10 @@ function renderNode(node, topLevel) {
 
   if (node.type === 'group') {
     nameEl.classList.add('group');
-    if (!topLevel) li.classList.add('collapsed');
-    row.addEventListener('click', (e) => {
-      if (e.target === nameEl) li.classList.toggle('collapsed');
-    });
+    // Collapsed by default, except: the root, and any subtree containing an active filter match
+    // (so typing a query auto-expands the path down to the result instead of hiding it).
+    if (!topLevel && !(query && matches)) li.classList.add('collapsed');
+    row.addEventListener('click', () => li.classList.toggle('collapsed'));
   } else if (isCameraDataset(node)) {
     nameEl.classList.add('clickable');
     nameEl.title = 'Click to play back as camera frames';
@@ -200,13 +469,20 @@ function renderNode(node, topLevel) {
   }
   row.appendChild(nameEl);
 
-  const meta = document.createElement('span');
-  meta.className = 'node-meta';
-  if (node.type === 'dataset') {
-    meta.textContent = `${node.shape.join('x')} ${node.dtype}`;
+  if (isCameraDataset(node)) {
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-camera';
+    badge.textContent = 'CAM';
+    row.appendChild(badge);
   }
-  row.appendChild(meta);
   li.appendChild(row);
+
+  if (node.type === 'dataset') {
+    const meta = document.createElement('div');
+    meta.className = 'node-meta';
+    meta.textContent = `${node.shape.join('×')} · ${node.dtype}`;
+    li.appendChild(meta);
+  }
 
   const attrsText = attrsSummary(node.attrs);
   if (attrsText) {
@@ -221,7 +497,7 @@ function renderNode(node, topLevel) {
     ul.className = 'node-children';
     for (const child of node.children) {
       child._fullPath = node._fullPath ? `${node._fullPath}/${child.name}` : child.name;
-      ul.appendChild(renderNode(child, false));
+      ul.appendChild(renderNode(child, false, query));
     }
     li.appendChild(ul);
   }
@@ -340,6 +616,54 @@ const seriesPanel = document.getElementById('seriesPanel');
 const seriesPathEl = document.getElementById('seriesPath');
 const seriesCanvas = document.getElementById('seriesCanvas');
 const seriesLegend = document.getElementById('seriesLegend');
+const seriesTooltip = document.getElementById('seriesTooltip');
+
+// Set by drawSeries() to whatever it needs to map a mouse position back to a data value; read by
+// the hover handler below. Kept separate from drawSeries' local scope since the handler fires
+// long after that function returns.
+let chartLayout = null;
+
+function chartYScale(v) {
+  const { min, max, pad, h } = chartLayout;
+  return h - pad - ((v - min) / (max - min)) * (h - pad - 8);
+}
+
+seriesCanvas.addEventListener('mousemove', (e) => {
+  if (!chartLayout) return;
+  const rect = seriesCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const { rows, numCols, singleSample, pad, w } = chartLayout;
+  if (mx < pad || mx > w - 4) {
+    seriesTooltip.style.display = 'none';
+    return;
+  }
+  const n = singleSample ? numCols : rows.length;
+  const idx = Math.min(Math.max(Math.round(((mx - pad) / (w - pad - 8)) * (n - 1)), 0), n - 1);
+
+  let text;
+  if (singleSample) {
+    text = `col ${idx}: ${rows[0][idx].toFixed(4)}`;
+  } else {
+    // Several columns can share the same time step (e.g. all 132 joint_targets columns) -- pick
+    // whichever column's line is vertically closest to the cursor rather than listing them all.
+    const row = rows[idx];
+    let bestCol = 0, bestDist = Infinity;
+    for (let c = 0; c < numCols; c++) {
+      const dist = Math.abs(chartYScale(row[c]) - my);
+      if (dist < bestDist) { bestDist = dist; bestCol = c; }
+    }
+    text = numCols > 1 ? `t=${idx}, col ${bestCol}: ${row[bestCol].toFixed(4)}` : `t=${idx}: ${row[0].toFixed(4)}`;
+  }
+  seriesTooltip.textContent = text;
+  seriesTooltip.style.display = 'block';
+  seriesTooltip.style.left = `${e.clientX + 14}px`;
+  seriesTooltip.style.top = `${e.clientY + 14}px`;
+});
+
+seriesCanvas.addEventListener('mouseleave', () => {
+  seriesTooltip.style.display = 'none';
+});
 
 async function selectSeries(path) {
   document.getElementById('emptyHint').style.display = 'none';
@@ -367,6 +691,7 @@ function drawSeries(data) {
   const pad = 28;
   const xScale = (i) => pad + (i / Math.max(1, rows.length - 1)) * (w - pad - 8);
   const yScale = (v) => h - pad - ((v - min) / (max - min)) * (h - pad - 8);
+  chartLayout = { rows, numCols, singleSample: rows.length === 1, min, max, pad, w, h };
 
   ctx.strokeStyle = '#8884';
   ctx.beginPath();
@@ -378,6 +703,37 @@ function drawSeries(data) {
   ctx.fillText(min.toFixed(3), 2, h - pad + 4);
 
   seriesLegend.innerHTML = '';
+
+  // A single row (e.g. initial_state/* -- one snapshot, not a trajectory) has no time axis to draw
+  // a line across, and even if it did, adjacent columns here are often unrelated quantities (e.g.
+  // root_pose is xyz position followed by a wxyz quaternion) -- connecting them with a line would
+  // draw a fake trend between numbers that have nothing to do with each other. Render each column
+  // as an independent lollipop (stem from zero + a dot) instead of a connected profile.
+  if (rows.length === 1) {
+    const values = rows[0];
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#6355e0';
+    const colScale = (c) => pad + (c / Math.max(1, numCols - 1)) * (w - pad - 8);
+    const baselineY = min <= 0 && max >= 0 ? yScale(0) : h - pad;
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    values.forEach((v, c) => {
+      const x = colScale(c);
+      ctx.beginPath();
+      ctx.moveTo(x, baselineY);
+      ctx.lineTo(x, yScale(v));
+      ctx.stroke();
+    });
+    ctx.lineWidth = 1;
+    ctx.fillStyle = accent;
+    values.forEach((v, c) => {
+      ctx.beginPath();
+      ctx.arc(colScale(c), yScale(v), 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    seriesLegend.textContent = `Single sample (e.g. initial_state) -- each dot is one column (index 0-${numCols - 1}), shown independently since adjacent columns are often unrelated quantities (e.g. xyz position then a quaternion).`;
+    return;
+  }
+
   const showLegend = numCols <= 24;
   for (let c = 0; c < numCols; c++) {
     const color = `hsl(${(c * 360) / numCols}, 70%, 45%)`;
