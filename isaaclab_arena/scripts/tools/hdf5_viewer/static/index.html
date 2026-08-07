@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>HDF5 Viewer</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    padding: 8px 12px;
+    border-bottom: 1px solid #8884;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  header select, header button {
+    font-size: 13px;
+    padding: 4px 8px;
+  }
+  #dirLabel { opacity: 0.6; margin-left: auto; }
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    min-height: 0;
+  }
+  #tree {
+    overflow: auto;
+    border-right: 1px solid #8884;
+    padding: 8px;
+  }
+  #panels {
+    overflow: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  ul.node-children { list-style: none; margin: 0; padding-left: 16px; }
+  li.node { margin: 2px 0; }
+  .node-row { display: flex; align-items: baseline; gap: 6px; cursor: default; }
+  .node-name { font-weight: 600; }
+  .node-name.group { cursor: pointer; }
+  .node-name.clickable { cursor: pointer; color: #2b7de9; }
+  .node-name.clickable:hover { text-decoration: underline; }
+  .node-meta { opacity: 0.55; font-size: 11px; }
+  .node-attrs { opacity: 0.6; font-size: 11px; }
+  .collapsed > ul.node-children { display: none; }
+  .panel { border: 1px solid #8884; border-radius: 6px; padding: 10px; }
+  .panel h3 { margin: 0 0 8px 0; font-size: 13px; }
+  .panel .path { font-family: monospace; opacity: 0.7; font-size: 11px; margin-bottom: 6px; word-break: break-all; }
+  /* Native resolution: cameras are recorded at 224x224 (env_args' camera_cfg), no upscaling. */
+  #frameImg { width: min(224px, 100%); image-rendering: pixelated; border: 1px solid #8884; background: #0002; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+  #seriesCanvas { width: 100%; height: 240px; border: 1px solid #8884; }
+  #seriesLegend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; font-size: 11px; }
+  #seriesLegend span.swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }
+  .empty-hint { opacity: 0.5; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <select id="fileSelect"><option>Loading files...</option></select>
+  <button id="refreshBtn">Refresh</button>
+  <span id="dirLabel"></span>
+</header>
+<main>
+  <div id="tree"><div class="empty-hint">Select a file to browse its structure.</div></div>
+  <div id="panels">
+    <div class="panel" id="cameraPanel" style="display:none">
+      <h3>Camera</h3>
+      <div class="path" id="cameraPath"></div>
+      <img id="frameImg" />
+      <div class="row">
+        <button id="playBtn">Play</button>
+        <button id="prevFrameBtn" title="Previous frame">&laquo; Prev</button>
+        <button id="nextFrameBtn" title="Next frame">Next &raquo;</button>
+        <input type="range" id="frameSlider" min="0" max="0" value="0" style="flex:1" />
+        <span id="frameLabel">0 / 0</span>
+        <label>fps <input type="number" id="fpsInput" value="50" min="1" max="60" style="width:48px" /></label>
+      </div>
+      <div class="node-attrs" style="margin-top:6px">
+        Recorded at 50Hz (env_args.sim_args: dt=0.005s &times; decimation=4). Cameras only refresh
+        at 20Hz (update_period=0.05s), so consecutive recorded frames repeat the same image ~2-3
+        times before it changes -- expected, not a bug.
+      </div>
+    </div>
+    <div class="panel" id="seriesPanel" style="display:none">
+      <h3>Signal</h3>
+      <div class="path" id="seriesPath"></div>
+      <canvas id="seriesCanvas"></canvas>
+      <div id="seriesLegend"></div>
+    </div>
+    <div class="empty-hint" id="emptyHint">Click a camera dataset (obs/*_camera_rgb) to play it back, or a numeric dataset (actions, joint_targets/*, raw_action/*, raw_input/*, ...) to plot it.</div>
+  </div>
+</main>
+<script>
+const fileSelect = document.getElementById('fileSelect');
+const treeEl = document.getElementById('tree');
+const dirLabel = document.getElementById('dirLabel');
+
+let currentFile = null;
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+async function loadFiles() {
+  const data = await fetchJson('/api/files');
+  dirLabel.textContent = data.dir;
+  fileSelect.innerHTML = '';
+  if (data.files.length === 0) {
+    fileSelect.innerHTML = '<option>(no .hdf5 files found)</option>';
+    return;
+  }
+  for (const name of data.files) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    fileSelect.appendChild(opt);
+  }
+  currentFile = data.files[0];
+  fileSelect.value = currentFile;
+  await loadTree();
+}
+
+fileSelect.addEventListener('change', async () => {
+  currentFile = fileSelect.value;
+  await loadTree();
+});
+document.getElementById('refreshBtn').addEventListener('click', loadFiles);
+
+async function loadTree() {
+  treeEl.innerHTML = '<div class="empty-hint">Loading...</div>';
+  try {
+    const tree = await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`);
+    treeEl.innerHTML = '';
+    treeEl.appendChild(renderNode(tree, true));
+  } catch (err) {
+    treeEl.innerHTML = `<div class="empty-hint">Error loading tree: ${err.message}</div>`;
+    throw err;
+  }
+}
+
+function isCameraDataset(node) {
+  return node.type === 'dataset' && node.shape.length === 4 && node.shape[3] === 3 && node.dtype === 'uint8';
+}
+
+function isSeriesDataset(node) {
+  if (node.type !== 'dataset') return false;
+  if (isCameraDataset(node)) return false;
+  const numericKinds = ['float32', 'float64', 'int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64'];
+  return node.shape.length >= 1 && node.shape.length <= 2 && numericKinds.includes(node.dtype);
+}
+
+function attrsSummary(attrs) {
+  const keys = Object.keys(attrs || {});
+  if (keys.length === 0) return '';
+  return keys
+    .filter((k) => k !== 'env_args') // env_args is a large JSON blob, too noisy for the tree row
+    .map((k) => `${k}=${JSON.stringify(attrs[k])}`)
+    .join(', ');
+}
+
+function renderNode(node, topLevel) {
+  const li = document.createElement('li');
+  li.className = 'node';
+  const row = document.createElement('div');
+  row.className = 'node-row';
+
+  const nameEl = document.createElement('span');
+  nameEl.textContent = node.name;
+  nameEl.className = 'node-name';
+
+  if (node.type === 'group') {
+    nameEl.classList.add('group');
+    if (!topLevel) li.classList.add('collapsed');
+    row.addEventListener('click', (e) => {
+      if (e.target === nameEl) li.classList.toggle('collapsed');
+    });
+  } else if (isCameraDataset(node)) {
+    nameEl.classList.add('clickable');
+    nameEl.title = 'Click to play back as camera frames';
+    nameEl.addEventListener('click', () => selectCamera(node._fullPath));
+  } else if (isSeriesDataset(node)) {
+    nameEl.classList.add('clickable');
+    nameEl.title = 'Click to plot';
+    nameEl.addEventListener('click', () => selectSeries(node._fullPath));
+  }
+  row.appendChild(nameEl);
+
+  const meta = document.createElement('span');
+  meta.className = 'node-meta';
+  if (node.type === 'dataset') {
+    meta.textContent = `${node.shape.join('x')} ${node.dtype}`;
+  }
+  row.appendChild(meta);
+  li.appendChild(row);
+
+  const attrsText = attrsSummary(node.attrs);
+  if (attrsText) {
+    const attrsEl = document.createElement('div');
+    attrsEl.className = 'node-attrs';
+    attrsEl.textContent = attrsText;
+    li.appendChild(attrsEl);
+  }
+
+  if (node.type === 'group' && node.children) {
+    const ul = document.createElement('ul');
+    ul.className = 'node-children';
+    for (const child of node.children) {
+      child._fullPath = node._fullPath ? `${node._fullPath}/${child.name}` : child.name;
+      ul.appendChild(renderNode(child, false));
+    }
+    li.appendChild(ul);
+  }
+  return li;
+}
+
+// --- Camera panel ---
+const cameraPanel = document.getElementById('cameraPanel');
+const cameraPath = document.getElementById('cameraPath');
+const frameImg = document.getElementById('frameImg');
+const frameSlider = document.getElementById('frameSlider');
+const frameLabel = document.getElementById('frameLabel');
+const playBtn = document.getElementById('playBtn');
+const prevFrameBtn = document.getElementById('prevFrameBtn');
+const nextFrameBtn = document.getElementById('nextFrameBtn');
+const fpsInput = document.getElementById('fpsInput');
+
+let cameraState = { path: null, numFrames: 0, index: 0, playing: false };
+
+async function selectCamera(path) {
+  document.getElementById('emptyHint').style.display = 'none';
+  const tree = await fetchJson(`/api/tree?file=${encodeURIComponent(currentFile)}`);
+  const node = findNode(tree, path);
+  stopPlayback();
+  cameraState = { path, numFrames: node.shape[0], index: 0, playing: false };
+  cameraPanel.style.display = '';
+  cameraPath.textContent = path;
+  frameSlider.max = String(node.shape[0] - 1);
+  frameSlider.value = '0';
+  renderFrame();
+}
+
+function findNode(tree, path) {
+  const parts = path.split('/');
+  let node = tree;
+  for (const part of parts) {
+    node = node.children.find((c) => c.name === part);
+    if (!node) throw new Error(`path not found in tree: ${path}`);
+  }
+  return node;
+}
+
+function frameUrl(path, index) {
+  return `/api/frame?file=${encodeURIComponent(currentFile)}&path=${encodeURIComponent(path)}&index=${index}`;
+}
+
+function renderFrame() {
+  const { path, index } = cameraState;
+  frameImg.src = frameUrl(path, index);
+  frameLabel.textContent = `${index} / ${cameraState.numFrames - 1}`;
+  frameSlider.value = String(index);
+}
+
+frameSlider.addEventListener('input', () => {
+  stopPlayback();
+  cameraState.index = Number(frameSlider.value);
+  renderFrame();
+});
+
+function stepFrame(delta) {
+  stopPlayback();
+  const n = cameraState.numFrames;
+  cameraState.index = ((cameraState.index + delta) % n + n) % n; // wrap both directions
+  renderFrame();
+}
+
+prevFrameBtn.addEventListener('click', () => stepFrame(-1));
+nextFrameBtn.addEventListener('click', () => stepFrame(1));
+
+function stopPlayback() {
+  cameraState.playing = false;
+  playBtn.textContent = 'Play';
+}
+
+// Timer-driven playback would keep reassigning frameImg.src every tick regardless of whether the
+// previous frame finished loading; the browser then aborts the in-flight request each time a new
+// src is set, so with per-frame latency above the tick interval the image never advances past the
+// first frame. Instead, each step waits for its frame to actually load before scheduling the next
+// one, adapting to real fetch latency instead of freezing.
+function schedulePlaybackStep() {
+  if (!cameraState.playing) return;
+  const fps = Math.max(1, Number(fpsInput.value) || 15);
+  const targetIntervalMs = 1000 / fps;
+  const { path, index } = cameraState;
+  const start = performance.now();
+  const preloadImg = new Image();
+  const advance = () => {
+    if (!cameraState.playing) return;
+    cameraState.index = (index + 1) % cameraState.numFrames;
+    const elapsed = performance.now() - start;
+    setTimeout(schedulePlaybackStep, Math.max(0, targetIntervalMs - elapsed));
+  };
+  preloadImg.onload = () => {
+    if (!cameraState.playing) return;
+    frameImg.src = preloadImg.src;
+    frameLabel.textContent = `${index} / ${cameraState.numFrames - 1}`;
+    frameSlider.value = String(index);
+    advance();
+  };
+  preloadImg.onerror = advance; // skip a frame that failed to load rather than getting stuck
+  preloadImg.src = frameUrl(path, index);
+}
+
+playBtn.addEventListener('click', () => {
+  if (cameraState.playing) {
+    stopPlayback();
+    return;
+  }
+  cameraState.playing = true;
+  playBtn.textContent = 'Pause';
+  schedulePlaybackStep();
+});
+
+// --- Series panel ---
+const seriesPanel = document.getElementById('seriesPanel');
+const seriesPathEl = document.getElementById('seriesPath');
+const seriesCanvas = document.getElementById('seriesCanvas');
+const seriesLegend = document.getElementById('seriesLegend');
+
+async function selectSeries(path) {
+  document.getElementById('emptyHint').style.display = 'none';
+  const data = await fetchJson(`/api/series?file=${encodeURIComponent(currentFile)}&path=${encodeURIComponent(path)}`);
+  seriesPanel.style.display = '';
+  seriesPathEl.textContent = `${path}  (shape ${data.shape.join('x')}, ${data.dtype})`;
+  drawSeries(data.data);
+}
+
+function drawSeries(data) {
+  const rows = Array.isArray(data[0]) ? data : data.map((v) => [v]);
+  const numCols = rows[0].length;
+  const canvas = seriesCanvas;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  let min = Infinity, max = -Infinity;
+  for (const row of rows) for (const v of row) { if (v < min) min = v; if (v > max) max = v; }
+  if (min === max) { min -= 1; max += 1; }
+  const pad = 28;
+  const xScale = (i) => pad + (i / Math.max(1, rows.length - 1)) * (w - pad - 8);
+  const yScale = (v) => h - pad - ((v - min) / (max - min)) * (h - pad - 8);
+
+  ctx.strokeStyle = '#8884';
+  ctx.beginPath();
+  ctx.moveTo(pad, 4); ctx.lineTo(pad, h - pad); ctx.lineTo(w - 4, h - pad);
+  ctx.stroke();
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText(max.toFixed(3), 2, 12);
+  ctx.fillText(min.toFixed(3), 2, h - pad + 4);
+
+  seriesLegend.innerHTML = '';
+  const showLegend = numCols <= 24;
+  for (let c = 0; c < numCols; c++) {
+    const color = `hsl(${(c * 360) / numCols}, 70%, 45%)`;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    rows.forEach((row, i) => {
+      const x = xScale(i), y = yScale(row[c]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    if (showLegend) {
+      const item = document.createElement('span');
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = color;
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(`col ${c}`));
+      seriesLegend.appendChild(item);
+    }
+  }
+  if (!showLegend) {
+    seriesLegend.textContent = `${numCols} columns (legend omitted)`;
+  }
+}
+
+loadFiles();
+</script>
+</body>
+</html>
