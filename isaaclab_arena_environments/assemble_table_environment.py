@@ -37,8 +37,11 @@ def _register_local_assets(asset_registry: AssetRegistry) -> None:
     if asset_registry.is_registered("leg001", ensure_loaded=False):
         return
 
+    import isaaclab.sim as sim_utils
+    from isaaclab.utils import configclass
+
     from isaaclab_arena.assets.background_library import LibraryBackground
-    from isaaclab_arena.assets.object_library import LibraryObject
+    from isaaclab_arena.assets.object_library import LibraryObject, LightBase
 
     @register_asset
     class Leg001(LibraryObject):
@@ -67,6 +70,121 @@ def _register_local_assets(asset_registry: AssetRegistry) -> None:
         # in build()'s set_initial_pose); ~0.15 m of clearance below that before an
         # object is considered dropped.
         object_min_z = 0.6
+
+    @configclass
+    class _RectLightCfg(sim_utils.LightCfg):
+        """A rectangular area light -- Isaac Lab's light spawners don't include one.
+
+        ``spawn_light`` (the generic light-spawner function every ``LightCfg`` subclass
+        uses via its inherited ``func`` default) creates a prim of ``prim_type`` and then
+        sets every other dataclass field as a matching ``inputs:<field>`` USD attribute --
+        so a plain ``LightCfg`` subclass with ``prim_type="RectLight"`` plus ``width``/
+        ``height`` (mirroring how ``DiskLightCfg`` adds ``radius``) works with no custom
+        spawn function needed.
+        """
+
+        prim_type = "RectLight"
+        width: float = 1.0
+        height: float = 1.0
+
+    @register_asset
+    class RobofinalsRectLight(LightBase):
+        """Large overhead area light matching robofinals/LightwheelAI's Scene02.usd rig.
+
+        Scene02.usd lights this same workbench with a single ``RectLight`` (100x100m,
+        ~14m up) instead of Arena's usual DomeLight+DistantLight combo -- no dome light
+        at all, which is also why the sky renders black with no separate
+        ``visible_in_primary_ray`` trick needed. See this asset's call site in build()
+        for how the exact position/orientation/intensity were extracted via pxr from
+        Scene02.usd's ``/World/RectLight_01`` and re-anchored onto Arena's own coordinate
+        frame (the same rigid translation Table278/Table001/Leg001's poses already use).
+        """
+
+        name = "robofinals_rect_light"
+        tags = ["light", "ikea"]
+        default_prim_path = "/World/RobofinalsRectLight"
+        default_intensity = 800.0
+        default_spawner_cfg = _RectLightCfg(intensity=default_intensity, width=100.0, height=100.0)
+
+        spawner_cfg: _RectLightCfg
+
+        def __init__(
+            self,
+            instance_name: str | None = None,
+            prim_path: str | None = default_prim_path,
+            initial_pose=None,
+            spawner_cfg: _RectLightCfg = default_spawner_cfg,
+        ):
+            super().__init__(
+                instance_name=instance_name,
+                prim_path=prim_path,
+                initial_pose=initial_pose,
+                spawner_cfg=spawner_cfg,
+            )
+
+    @register_asset
+    class RobofinalsSphereLight(LightBase):
+        """Small, very bright point light matching Scene02.usd's ground-plane SphereLight.
+
+        Isaac Sim's stock grid ground-plane asset (``default_environment.usd``, what
+        ``ground_plane``/``GroundPlaneCfg`` spawns) comes with its own small SphereLight
+        baked in at ``{prim_path}/SphereLight`` -- Isaac Lab's own ``spawn_ground_plane``
+        deliberately hides it right after spawning (its comment: "isn't bright enough and
+        messes up with the user's lighting settings"), which is exactly why our own
+        ground plane never showed it. Scene02.usd is a static export of that same stock
+        asset, though, made before/without ever going through ``spawn_ground_plane`` --
+        so its copy (``/World/FlatGrid/SphereLight``) was never hidden and stayed lit,
+        and it's what reads as the sharp point-light highlight on Table278's glossy top
+        in robofinals' renders (per Jorge, it looked like an actual light, not just a
+        specular reflection off the RectLight above -- confirmed by finding this second,
+        independent light prim directly in the USD). See this asset's call site in
+        build() for the source values (extracted via pxr).
+        """
+
+        name = "robofinals_sphere_light"
+        tags = ["light", "ikea"]
+        default_prim_path = "/World/RobofinalsSphereLight"
+        default_intensity = 100000.0
+        default_spawner_cfg = sim_utils.SphereLightCfg(intensity=default_intensity, radius=0.25)
+
+        spawner_cfg: sim_utils.SphereLightCfg
+
+        def __init__(
+            self,
+            instance_name: str | None = None,
+            prim_path: str | None = default_prim_path,
+            initial_pose=None,
+            spawner_cfg: sim_utils.SphereLightCfg = default_spawner_cfg,
+        ):
+            super().__init__(
+                instance_name=instance_name,
+                prim_path=prim_path,
+                initial_pose=initial_pose,
+                spawner_cfg=spawner_cfg,
+            )
+
+
+def _spawn_dark_ground_plane(prim_path, cfg, translation=None, orientation=None, **kwargs):
+    """Spawn the stock grid ground plane, then dim it to match robofinals' floor.
+
+    GroundPlaneCfg only exposes the grid material's ``diffuse_tint`` (via its ``color``
+    field); robofinals' own reference scene leaves that at its default (1,1,1) and instead
+    overrides ``inputs:albedo_brightness`` (0.19 vs. the stock ~1.0) on the same OmniPBR
+    grid material -- see the comment above this function's call site in build() for how
+    that was confirmed. Patched here via USD directly since the dataclass has no field
+    for it.
+    """
+    from pxr import Sdf  # noqa: PLC0415
+
+    import isaaclab.sim as sim_utils  # noqa: PLC0415
+
+    prim = sim_utils.spawn_ground_plane(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
+    sim_utils.change_prim_property(
+        prop_path=f"{prim_path}/Looks/theGrid/Shader.inputs:albedo_brightness",
+        value=0.19,
+        type_to_create_if_not_exist=Sdf.ValueTypeNames.Float,
+    )
+    return prim
 
 
 @dataclass
@@ -102,14 +220,75 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         background = self.asset_registry.get_asset_by_name(cfg.background)()
         fixed_asset = self.asset_registry.get_asset_by_name(cfg.fixed_object)()  # tabletop
         held_asset = self.asset_registry.get_asset_by_name(cfg.held_object)()  # leg
-        light = self.asset_registry.get_asset_by_name("light")()
-        # Reference scene also has a distant/sun light alongside its dome-ish
-        # fill light; DomeLight alone left harder shadows than Scene_enabled.usd.
-        directional_light = self.asset_registry.get_asset_by_name("directional_light")()
+        # Tried a DomeLight (uniform gray-white, visible_in_primary_ray=False to hide its
+        # color from camera views) + DistantLight combo first (2026-08-08), to get a black
+        # sky without going pitch-black. But that read as a workaround, not the real
+        # answer, and left a hard directional shadow under fixed_asset that robofinals'
+        # own renders don't show. Inspected Scene02.usd directly via pxr instead: it has
+        # no dome light or sun at all -- lighting comes from a single huge RectLight
+        # (/World/RectLight_01, 100x100m, ~14m up, intensity=800), which is why the sky
+        # is black with nothing to suppress and shadows are soft (huge area light, not a
+        # point/directional source). RobofinalsRectLight (registered above) reproduces
+        # that light exactly: its world position/orientation were read from
+        # /World/RectLight_01's xformOps and re-anchored with the same rigid (x, y)
+        # offset (+1.944878, -2.372593) that Table278/Table001/Leg001's own poses already
+        # apply to go from Scene02.usd's raw coordinates to Arena's -- confirmed by
+        # computing that offset independently from both Table278's and Table001's raw vs.
+        # Arena poses and getting the same value (to ~1e-4, Arena's own rounding) each
+        # time. RectLight_01's rotation is a 90 deg spin about its own -Z (already
+        # facing down in this Z-up scene) so no re-derivation was needed there.
+        rect_light = self.asset_registry.get_asset_by_name("robofinals_rect_light")()
+        rect_light.set_initial_pose(
+            Pose(
+                position_xyz=(-2.114823, -2.372593, 13.926534),
+                rotation_xyzw=(0.0, 0.0, 0.7071067811865475, 0.7071067811865476),
+            )
+        )
+        # Per Jorge, robofinals' render also shows a sharp point-light highlight on
+        # Table278's top that the RectLight alone doesn't explain -- traced to a second,
+        # independent light: /World/FlatGrid/SphereLight in Scene02.usd. It's the small
+        # SphereLight the *stock* grid ground-plane asset (default_environment.usd, what
+        # our own "ground_plane" spawns) comes with baked in -- IsaacLab's own
+        # spawn_ground_plane() always hides it right after spawning (see its "isn't
+        # bright enough and messes up with the user's lighting settings" comment), which
+        # is exactly why our ground plane never showed one. Scene02.usd is a static
+        # export made without going through that hiding step, so its copy stayed lit.
+        # First tried its raw local position (0, 0, 2.5) unmodified (2026-08-08), reasoning
+        # that /World/FlatGrid sits at Scene02.usd's own world origin same as our
+        # ground_plane -- too close to the table per Jorge's visual read (the highlight
+        # landed well short of where robofinals shows it). That reasoning didn't actually
+        # hold: FlatGrid's own origin in Scene02.usd is just wherever that asset happened
+        # to be dropped, not something meaningfully tied to Table278's position, so there
+        # was no reason to treat it as a landmark shared with Arena's independently-chosen
+        # ground_plane origin. Applying the *same* rigid (x, y) offset used for every other
+        # Scene02.usd-derived pose in this file (Table278/Table001/Leg001/RectLight_01)
+        # instead -- consistent with all of them, and rigid translation preserves the
+        # ~2.75m horizontal separation from Table278 that the raw scene actually has.
+        sphere_light = self.asset_registry.get_asset_by_name("robofinals_sphere_light")()
+        sphere_light.set_initial_pose(
+            Pose(position_xyz=(1.944878, -2.372593, 2.5), rotation_xyzw=(0.0, 0.0, 0.0, 1.0))
+        )
         # GroundPlaneCfg tints its grid material black by default (color=(0,0,0));
         # override so it isn't rendered pitch black.
+        #
+        # Tried matching robofinals/LightwheelAI's dark-floor look purely via
+        # GroundPlaneCfg.color (2026-08-08) -- that field only sets the grid material's
+        # diffuse_tint, and several tint values were tried (down to (0.008, 0.02, 0.04))
+        # without landing on the right look, per Jorge's visual read each time.
+        # Inspected robofinals' own reference scene (submodules/IROS_IKEA_V13_20260702/
+        # Scene02.usd, prim /World/FlatGrid/Looks/theGrid/Shader) directly via pxr to stop
+        # guessing: it uses the *exact same* OmniPBR grid material as Isaac Sim's stock
+        # default_environment.usd (same Wireframe_blue.png diffuse/emissive textures,
+        # same emissive_intensity=1000 self-lit blue grid lines -- confirmed identical
+        # inputs:* values on both, diffuse_tint included). The only value the reference
+        # scene actually overrides is inputs:albedo_brightness=0.19 (vs. the ~1.0 default),
+        # with diffuse_tint left untouched at (1,1,1) -- so diffuse_tint was never the
+        # right knob to turn. GroundPlaneCfg has no albedo_brightness field, so
+        # _spawn_dark_ground_plane below spawns the stock plane via
+        # sim_utils.spawn_ground_plane and then patches that one extra shader input via
+        # USD directly, matching robofinals' value exactly instead of eyeballing a tint.
         ground_plane = self.asset_registry.get_asset_by_name("ground_plane")(
-            spawner_cfg=sim_utils.GroundPlaneCfg(color=(0.05, 0.25, 0.5))
+            spawner_cfg=sim_utils.GroundPlaneCfg(color=(1.0, 1.0, 1.0), func=_spawn_dark_ground_plane)
         )
 
         # Step 2: Select the embodiment
@@ -225,8 +404,8 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
                 extra_leg_3,
                 extra_leg_4,
                 ground_plane,
-                light,
-                directional_light,
+                rect_light,
+                sphere_light,
             ]
         )
 
