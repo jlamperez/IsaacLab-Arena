@@ -157,14 +157,21 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # the table once actually placed, per Jorge. Backed off to x=0.02 (~0.59m to the
         # leg, ~15cm table clearance) -- still too close per Jorge. Backed off again to
         # x=-0.05 (~0.65m to the leg, ~22cm table clearance), keeping the 10 deg yaw.
-        # TEMPORARY, 2026-08-02: backed off ~0.35m in x from the tuned -0.05 above (Jorge:
-        # the tuned reach pose is too close for the "move to table" navigate_cmd test; the
-        # -1.25 first attempt lost the table from camera view entirely -- this is a middle
-        # distance matching a reference photo framing) -- revert to (-0.05, -0.203, 0.78)
-        # for grasp-reach testing.
+        # Back to the tuned reach pose (see the long history above) for grasp testing with
+        # all 4 legs now present -- the wider x=0.0/-0.2 positions were temporary, used only
+        # for the navigate_cmd/"move to table" experiments on 2026-08-02/06.
+        #
+        # Nudged closer again, 2026-08-06: the 4-leg rollout got a genuine reach toward the
+        # nearest leg (see gr00t_dex1_eef_closedloop_policy.py's session notes) before losing
+        # balance/camera framing around t=6-7s -- shortening the remaining reach distance may
+        # reduce how far the arm/torso has to commit. Per Jorge, pushed past the -0.02 first
+        # try, back to x=0.02 -- the same value rejected as "too close" on 2026-07-31, but
+        # that was before the quaternion-convention fix, the EEF-composition fix, and the
+        # 4-leg scene composition above, so worth re-testing now rather than assuming it
+        # still holds.
         embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(
             enable_cameras=cfg.enable_cameras,
-            initial_pose=Pose(position_xyz=(0.0, -0.203, 0.78), rotation_xyzw=(0.0, 0.0, -0.08715574274765817, 0.9961946980917455)),
+            initial_pose=Pose(position_xyz=(0.02, -0.203, 0.78), rotation_xyzw=(0.0, 0.0, -0.08715574274765817, 0.9961946980917455)),
         )
         # Step 3: Place the support surface and the two assembly parts.
         # These poses are read directly out of the kit's own reference scene
@@ -188,8 +195,40 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # itself belongs at z=0.
         ground_plane.set_initial_pose(Pose(position_xyz=(0.0, 0.0, 0.0)))
 
+        # Extra legs (cosmetic only -- NOT tracked by AssemblyTask's fixed/held-asset
+        # success check, see the multi-socket TODO on that task above): the BitRobot
+        # dataset always shows all 4 legs laid out next to the tabletop, never just 1,
+        # so a policy fine-tuned on that footage is seeing an out-of-distribution scene
+        # here otherwise. Laid out in a row alongside held_asset (same x/z/rotation).
+        # y-spacing corrected 2026-08-08 from an initial 0.12 m guess to the kit's own
+        # real spacing (~0.06 m), read directly from Scene02.usd's Leg001/Leg001_01/
+        # Leg001_03/Leg001_06 world transforms via pxr.UsdGeom.XformCache (matches the
+        # LightwheelAI/iros2026-ikea-assembly HDF5 dataset's initial_state exactly, since
+        # that dataset was recorded in this same scene) -- the 0.12 m guess left the extra
+        # legs standing in empty space relative to where a replayed grasp trajectory
+        # actually reaches. held_asset (leg001, y=-0.4067) is untouched -- it already
+        # matched Leg001's own real position; only the 3 cosmetic extras move.
+        extra_leg_2 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_2")
+        extra_leg_3 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_3")
+        extra_leg_4 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_4")
+        extra_leg_2.set_initial_pose(Pose(position_xyz=(0.5111, -0.3468, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
+        extra_leg_3.set_initial_pose(Pose(position_xyz=(0.5111, -0.4666, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
+        extra_leg_4.set_initial_pose(Pose(position_xyz=(0.5111, -0.5296, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
+
         # Step 4: Compose the scene
-        scene = Scene(assets=[background, fixed_asset, held_asset, ground_plane, light, directional_light])
+        scene = Scene(
+            assets=[
+                background,
+                fixed_asset,
+                held_asset,
+                extra_leg_2,
+                extra_leg_3,
+                extra_leg_4,
+                ground_plane,
+                light,
+                directional_light,
+            ]
+        )
 
         # Step 5: Define the task
         task = AssemblyTask(
