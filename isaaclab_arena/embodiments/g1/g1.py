@@ -145,6 +145,21 @@ _DEX1_HEAD_CAMERA_OFFSET = Pose(
     rotation_xyzw=(0.65925248, -0.65925248, 0.25570719, -0.25570719),
 )
 
+# Wrist-mounted hand cameras, offset from left_wrist_yaw_link/right_wrist_yaw_link. Not a
+# visual guess or independent tuning like the head camera above -- these are the exact
+# left_hand_camera/right_hand_camera offsets from robofinals'
+# UnitreeG1GripperControllerDecoupledWBCEnvCfg ("G1-Gripper-Controller-DecoupledWBC"), the
+# same robofinals robot config that recorded the LightwheelAI/iros2026-ikea-assembly dataset
+# (see lightwheel_hdf5_replay_policy.py's module docstring). Both hands share one offset
+# tuple in the source too -- left_wrist_yaw_link/right_wrist_yaw_link are mirrored, so the
+# same wrist-local pose lands the camera symmetrically on each hand. Convention is "opengl"
+# there (not "ros", unlike _DEFAULT_G1_CAMERA_OFFSET/_DEX1_HEAD_CAMERA_OFFSET above) --
+# kept as opengl below so the reproduced pose matches exactly, not just the numbers.
+_DEX1_HAND_CAMERA_OFFSET = Pose(
+    position_xyz=(0.06017, 0.0, 0.14333),
+    rotation_xyzw=(0.3925, -0.35855, -0.58749, 0.61012),
+)
+
 
 @register_asset
 class G1WBCJointEmbodiment(G1EmbodimentBase):
@@ -668,6 +683,46 @@ class G1AgileDex1CameraCfg(G1CameraCfg):
             pos=_DEX1_HEAD_CAMERA_OFFSET.position_xyz,
             rot=_DEX1_HEAD_CAMERA_OFFSET.rotation_xyzw,
             convention="ros",
+        ),
+    )
+
+    left_hand_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_wrist_yaw_link/LeftHandCam",
+        update_period=0.05,
+        height=224,
+        width=224,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=62,
+            vertical_aperture=39.8,  # ~79.5deg fovy at f=24.0, matching the real hand-camera lens.
+            clipping_range=(0.01, 50.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=_DEX1_HAND_CAMERA_OFFSET.position_xyz,
+            rot=_DEX1_HAND_CAMERA_OFFSET.rotation_xyzw,
+            convention="opengl",
+        ),
+    )
+
+    right_hand_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_wrist_yaw_link/RightHandCam",
+        update_period=0.05,
+        height=224,
+        width=224,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=62,
+            vertical_aperture=39.8,
+            clipping_range=(0.01, 50.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=_DEX1_HAND_CAMERA_OFFSET.position_xyz,
+            rot=_DEX1_HAND_CAMERA_OFFSET.rotation_xyzw,
+            convention="opengl",
         ),
     )
 
