@@ -17,7 +17,7 @@ import warp as wp
 from isaaclab.actuators import IdealPDActuatorCfg
 from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLMimicEnv  # noqa: F401
-from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg
+from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg, JointPositionActionCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -963,6 +963,57 @@ class G1WBCAgilePinkDex1ActionCfg(G1WBCAgilePinkActionCfg):
         open_command_expr={"right_dex1_finger_joint_.*": 0.0245},
         close_command_expr={"right_dex1_finger_joint_.*": -0.02},
     )
+
+
+@configclass
+class G1WBCAgilePinkDex1ContinuousGripActionCfg(G1WBCAgilePinkActionCfg):
+    """Like :class:`G1WBCAgilePinkDex1ActionCfg`, but with continuous (non-binary) Dex1 finger control.
+
+    Diagnostic-only, for replaying robofinals-recorded gripper commands faithfully:
+    replicates ``Dex1GripperCfg.process_hand``'s exact interpolation (``OPEN_POS +
+    clamp((x+1)/2, 0, 1) * (CLOSE_POS-OPEN_POS)``) as a plain affine scale+offset -- valid
+    since the formula is linear in ``x`` once the clamp (irrelevant for in-range recorded
+    values) is ignored. The stock ``BinaryJointPositionActionCfg`` used by
+    :class:`G1WBCAgilePinkDex1ActionCfg` only looks at the input's sign, so a continuous
+    close/open ramp collapses to two extremes -- swap here to preserve it.
+    """
+
+    left_gripper_action: ActionTermCfg = JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["left_dex1_finger_joint_1", "left_dex1_finger_joint_2"],
+        scale=-0.02225,
+        offset=0.00225,
+        use_default_offset=False,
+    )
+    right_gripper_action: ActionTermCfg = JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["right_dex1_finger_joint_1", "right_dex1_finger_joint_2"],
+        scale=-0.02225,
+        offset=0.00225,
+        use_default_offset=False,
+    )
+
+
+@register_asset
+class G1WBCAgilePinkDex1ContinuousGripEmbodiment(G1WBCAgilePinkDex1Embodiment):
+    """Same as :class:`G1WBCAgilePinkDex1Embodiment`, but with continuous Dex1 gripper control.
+
+    Diagnostic-only variant for replaying robofinals HDF5 actions faithfully -- see
+    :class:`G1WBCAgilePinkDex1ContinuousGripActionCfg`.
+    """
+
+    name = "g1_wbc_agile_pink_dex1_continuous_grip"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        lock_waist: bool = False,
+    ):
+        super().__init__(enable_cameras, initial_pose, lock_waist)
+        self.action_config = G1WBCAgilePinkDex1ContinuousGripActionCfg()
+        if lock_waist:
+            _remove_waist_from_pink_ik_action_config(self.action_config)
 
 
 def _remove_waist_from_pink_ik_action_config(
