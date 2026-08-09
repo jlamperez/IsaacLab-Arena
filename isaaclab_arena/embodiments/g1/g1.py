@@ -160,6 +160,19 @@ _DEX1_HAND_CAMERA_OFFSET = Pose(
     rotation_xyzw=(0.3925, -0.35855, -0.58749, 0.61012),
 )
 
+# robofinals' own "first_person_camera" offset (same UnitreeG1GripperControllerDecoupledWBCEnvCfg
+# as the hand cameras above) -- torso_link-mounted, distinct from _DEX1_HEAD_CAMERA_OFFSET.
+# Kept as a separate camera (dataset_first_person_cam below) rather than replacing
+# robot_head_cam: _DEX1_HEAD_CAMERA_OFFSET is Jorge's own real-hardware calibration (D435i/
+# stereo-module CAD mount, tuned against real reference footage -- see its own comment above),
+# while this one reproduces the synthetic pose robofinals actually rendered from when it
+# recorded LightwheelAI/iros2026-ikea-assembly. The two serve different purposes: robot_head_cam
+# for real-hardware fidelity, this one for pixel-parity with the recorded dataset.
+_DEX1_DATASET_FIRST_PERSON_CAMERA_OFFSET = Pose(
+    position_xyz=(0.10209156, -0.00937542, 0.42446595),
+    rotation_xyzw=(0.26523914, -0.27106013, -0.66472446, 0.64367383),
+)
+
 
 @register_asset
 class G1WBCJointEmbodiment(G1EmbodimentBase):
@@ -722,6 +735,26 @@ class G1AgileDex1CameraCfg(G1CameraCfg):
         offset=CameraCfg.OffsetCfg(
             pos=_DEX1_HAND_CAMERA_OFFSET.position_xyz,
             rot=_DEX1_HAND_CAMERA_OFFSET.rotation_xyzw,
+            convention="opengl",
+        ),
+    )
+
+    dataset_first_person_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link/DatasetFirstPersonCam",
+        update_period=0.05,
+        height=224,
+        width=224,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=19.3,
+            focus_distance=400.0,
+            horizontal_aperture=48.53,
+            vertical_aperture=35.37,  # Head camera FOV 103 x 85 deg (real robot), per robofinals.
+            clipping_range=(0.1, 1.0e5),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=_DEX1_DATASET_FIRST_PERSON_CAMERA_OFFSET.position_xyz,
+            rot=_DEX1_DATASET_FIRST_PERSON_CAMERA_OFFSET.rotation_xyzw,
             convention="opengl",
         ),
     )
