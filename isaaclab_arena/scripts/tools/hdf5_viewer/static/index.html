@@ -803,13 +803,23 @@ function findActionDef(envArgs, name) {
   return (envArgs.action_space_definition || []).find((d) => d.action_name === name) || null;
 }
 
-// The top-level per-demo "actions" dataset (23 columns) turns out to be base_action's
-// action_content list verbatim, in order -- NOT a concatenation with left_hand_action/
-// right_hand_action (those apparently land in a different dataset, e.g. processed_actions).
+// The top-level per-demo "actions" dataset (23 columns) uses base_action's own
+// action_content list as its labels, and that list happens to already be 23 names long --
+// but it IS effectively a concatenation of left_hand_action(1) + right_hand_action(1) +
+// base_action's real 21-D tensor (2026-08-08: confirmed against robofinals' actual
+// G1DecoupledWBCAction source, whose own action_dim property is 7+7+3+1+3=21, no hand-state
+// slots at all). action_content's leading "left_hand_state"/"right_hand_state" names are a
+// stale holdover from an earlier, since-refactored version of that class (same artifact
+// found in robofinals/utils/log_utils.py's debug-labeling code) -- cols 0-1 of the real
+// recorded array actually come from the separate left_hand_action/right_hand_action terms,
+// not from base_action itself, even though this label list (correctly, if confusingly)
+// still names them. The labels below are accurate; just don't take "base_action produced
+// all 23 of these columns" at face value.
 // Verified against real values, not just the schema: cols 2-8 and 9-15 each have one component
 // sitting at ~0.99-1.0 with the other three satisfying qx^2+qy^2+qz^2 ~= 1-qw^2 (a near-identity
-// quaternion), matching "..._qw,qx,qy,qz"; col 19 sits at a constant ~0.74, plausible as a G1's
-// commanded pelvis height ("base_height_cmd"); cols 20-22 sit at a constant 0 ("torso_ori_*").
+// quaternion), matching "..._qw,qx,qy,qz" -- also confirms the recorded quaternion order is
+// wxyz, not xyzw; col 19 sits at a constant ~0.74, plausible as a G1's commanded pelvis height
+// ("base_height_cmd"); cols 20-22 sit at a constant 0 ("torso_ori_*").
 function actionColumnLabels(envArgs, numCols) {
   const base = findActionDef(envArgs, 'base_action');
   if (!base || !Array.isArray(base.action_content)) return null;
