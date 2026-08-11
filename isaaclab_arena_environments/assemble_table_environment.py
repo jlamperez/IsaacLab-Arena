@@ -187,6 +187,35 @@ def _spawn_dark_ground_plane(prim_path, cfg, translation=None, orientation=None,
     return prim
 
 
+def _set_robofinals_physx_scene_params(env_cfg):
+    """Match two PhysX scene-wide contact params robofinals sets explicitly, Arena doesn't.
+
+    robofinals' own environment setup (``core/tasks/base.py``, ``core/rl/base.py``,
+    ``core/scenes/kitchen/kitchen.py`` -- all via a shared ``set_physx_scene_params``
+    helper) explicitly sets ``bounce_threshold_velocity=0.01`` and
+    ``friction_correlation_distance=0.00625`` on the same ``env_cfg.sim.physics``
+    (``PhysxCfg``) this environment also builds on. Arena's own ``PhysxCfg`` defaults are
+    0.5 and 0.025 respectively -- 50x and 4x higher. ``bounce_threshold_velocity`` is the
+    relative-velocity cutoff below which PhysX treats a contact as resting (no
+    restitution) rather than bouncing; at Arena's much higher default, essentially every
+    slow contact in this task (a footstrike, fingers closing on a leg) gets some spurious
+    bounce impulse it wouldn't get under robofinals' tuned value -- a plausible contributor
+    to both the walking-speed undershoot and the grasp not holding investigated 2026-08-10.
+    Deliberately does NOT reuse ``isaaclab_arena_environments.mdp.env_callbacks.
+    assembly_env_cfg_callback``: that one also overrides ``dt``/``decimation`` (1/60, 2)
+    away from the 1/200, 4 already verified to match robofinals' actual recording setup,
+    which this environment must not lose. Mutates ``env_cfg.sim.physics`` in place instead
+    of replacing it, to leave dt/decimation/render settings untouched.
+    """
+    from isaaclab_physx.physics import PhysxCfg
+
+    if env_cfg.sim.physics is None:
+        env_cfg.sim.physics = PhysxCfg()
+    env_cfg.sim.physics.bounce_threshold_velocity = 0.01
+    env_cfg.sim.physics.friction_correlation_distance = 0.00625
+    return env_cfg
+
+
 @dataclass
 class AssembleTableEnvironmentCfg(ArenaEnvironmentCfg):
     """Configure the IKEA table-leg assembly environment."""
@@ -366,8 +395,23 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         fixed_asset.set_initial_pose(
             Pose(position_xyz=(0.5, 0.0, 0.7994), rotation_xyzw=(0.7071, 0.7071, 0.0, 0.0)),
         )
+        # y=-0.3468 (not the "-0.4067" the held_asset slot used before 2026-08-10): the
+        # rigid Scene02.usd->Arena (x, y) offset this file uses everywhere
+        # (+1.944878, -2.372593, see the RectLight comment above) maps each leg's real
+        # dataset Y to an Arena Y -- Leg001_01 (2.0258) -> -0.3468, Leg001 (1.9659) ->
+        # -0.4067, Leg001_03 (1.9060) -> -0.4666, Leg001_06 (1.8429) -> -0.5296. Verified
+        # against the iros2026-ikea-assembly HDF5's own initial_state (recorded in this
+        # same scene) and against a still frame of robofinals' reference footage: Leg001_01
+        # is the leftmost leg in the row and the one demo_0 actually reaches for and grasps
+        # first (per Jorge, comparing the reference footage against a live Studio session)
+        # -- not "Leg001" (2nd from left), which is what held_asset was pinned to
+        # previously (this file's very first version of this scene just used the
+        # unsuffixed dataset key without checking which leg any given demo grabs first).
+        # Held_asset needs to be Leg001_01's slot so the AssemblyTask's success/contact
+        # tracking follows the same physical leg the replayed grasp trajectory is
+        # actually reaching for, instead of a cosmetic extra sitting 6cm off to the side.
         held_asset.set_initial_pose(
-            Pose(position_xyz=(0.5111, -0.4067, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)),
+            Pose(position_xyz=(0.5111, -0.3468, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)),
         )
         # Room floor -- Table278's placement above preserves its own floor
         # contact from Scene02.usd (its base sits at world z~0), so the floor
@@ -383,14 +427,13 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # real spacing (~0.06 m), read directly from Scene02.usd's Leg001/Leg001_01/
         # Leg001_03/Leg001_06 world transforms via pxr.UsdGeom.XformCache (matches the
         # LightwheelAI/iros2026-ikea-assembly HDF5 dataset's initial_state exactly, since
-        # that dataset was recorded in this same scene) -- the 0.12 m guess left the extra
-        # legs standing in empty space relative to where a replayed grasp trajectory
-        # actually reaches. held_asset (leg001, y=-0.4067) is untouched -- it already
-        # matched Leg001's own real position; only the 3 cosmetic extras move.
+        # that dataset was recorded in this same scene). extra_leg_2 now takes Leg001's old
+        # slot (y=-0.4067, see held_asset's comment above for why they swapped) --
+        # extra_leg_3/4 (Leg001_03/Leg001_06's slots) are unaffected.
         extra_leg_2 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_2")
         extra_leg_3 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_3")
         extra_leg_4 = self.asset_registry.get_asset_by_name(cfg.held_object)(instance_name="leg001_4")
-        extra_leg_2.set_initial_pose(Pose(position_xyz=(0.5111, -0.3468, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
+        extra_leg_2.set_initial_pose(Pose(position_xyz=(0.5111, -0.4067, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
         extra_leg_3.set_initial_pose(Pose(position_xyz=(0.5111, -0.4666, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
         extra_leg_4.set_initial_pose(Pose(position_xyz=(0.5111, -0.5296, 0.7905), rotation_xyzw=(-0.5, -0.5, 0.5, 0.5)))
 
@@ -487,6 +530,7 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
             embodiment=embodiment,
             scene=scene,
             task=task,
+            env_cfg_callback=_set_robofinals_physx_scene_params,
         )
         return isaaclab_arena_environment
 

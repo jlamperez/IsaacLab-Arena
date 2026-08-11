@@ -107,6 +107,25 @@ _DATASET_TABLE_KEY = "Table001_Table001_01"
 # Z here would bias every robot/leg offset computed relative to it by 1.4cm.
 _ARENA_TABLE_POS = np.array([0.5, 0.0, 0.7994 - 0.0140])
 
+# Column indices, within the 33-wide per-joint layout, of the 14 arm joints -- in
+# isaaclab_arena.embodiments.g1.g1.DATASET_ARM_JOINT_NAMES's order. Verified 2026-08-09
+# against env_args.action_space_definition's base_action applied_joint_names list (same
+# order) and empirically against frame 0's values matching G1_GEARWBC_CFG's own
+# init_state.joint_pos. Duplicated here rather than imported -- same reasoning as
+# _ARENA_TABLE_POS's own duplication-not-import comment above.
+#
+# Same 33-wide column layout is shared by two different HDF5 arrays with very different
+# meaning: states/articulation/robot/joint_position (realized state) and
+# joint_targets/joint_pos_target (PD setpoint, 132-wide = 33 joints x 4 physics substeps
+# per decimated step -- confirmed 2026-08-10 by diffing all 4 substep blocks against each
+# other, bit-identical at every step, i.e. a ZOH target like Arena's own action-hold).
+# Which one to replay as an *action* matters a lot, see the arm_joint_pos_ds load below.
+_DATASET_ARM_JOINT_POSITION_COLUMNS = [11, 12, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+
+# waist_yaw_joint, waist_roll_joint, waist_pitch_joint, in the same joint_position layout
+# (verified 2026-08-09, same method as the arm columns above).
+_DATASET_WAIST_JOINT_POSITION_COLUMNS = [2, 5, 8]
+
 
 @dataclass
 class LightwheelHdf5ReplayPolicyCfg(PolicyCfg):
@@ -120,6 +139,16 @@ class LightwheelHdf5ReplayPolicyCfg(PolicyCfg):
 
     policy_device: str = "cuda"
     """Device used for the action tensor."""
+
+    replay_recorded_arm_joints: bool = False
+    """Append the dataset's recorded arm joint PD targets after the base 27-D action, for
+    use with ``g1_wbc_pink_dex1_direct_arm_continuous_grip`` -- see that embodiment's
+    action_config docstring for why this bypasses Pink IK's solution multiplicity for the
+    arms. Sourced from ``joint_targets/joint_pos_target`` (the setpoint robofinals' own PD
+    tracked), not ``states/.../joint_position`` (their realized, already-lagged state) --
+    see the ``arm_joint_pos_ds`` load in ``__init__`` for why that distinction matters.
+    Leave False for the plain Pink-IK-driven Dex1 embodiments (wrong action_dim
+    otherwise)."""
 
 
 @register_policy
@@ -136,9 +165,47 @@ class LightwheelHdf5ReplayPolicy(PolicyBase[LightwheelHdf5ReplayPolicyCfg]):
             raw_actions = demo["actions"][:]
             robot_pose_traj_ds = demo["states"]["articulation"]["robot"]["root_pose"][:]
             table_pose_ds = demo["initial_state"]["rigid_object"][_DATASET_TABLE_KEY]["root_pose"][0]
+            if config.replay_recorded_arm_joints:
+                # joint_targets/joint_pos_target, NOT states/.../joint_position: the latter
+                # is robofinals' own *realized* joint state, which already carries their own
+                # PD tracking lag (confirmed 2026-08-10 by comparing the two arrays during a
+                # fast reach -- e.g. right_elbow_joint at frame 203 has state=+0.566 vs.
+                # target=+0.306, a 0.26rad/~15deg gap in the recording itself). Replaying
+                # the realized state as if it were a fresh target made Arena's own actuator
+                # track an already-lagged signal, compounding a second stage of lag on top
+                # of the first -- this, not actuator gains, was why arm tracking error grew
+                # specifically during fast motion regardless of which actuator model was
+                # tried (IdealPD, robofinals' default_implicit, new_implicit). Only the
+                # first 33 columns are used -- the 132-wide array's 4 blocks of 33 are the
+                # same target held across the decimated step's 4 physics substeps (see
+                # _DATASET_ARM_JOINT_POSITION_COLUMNS's comment), so any block gives the
+                # same values.
+                arm_joint_pos_ds = demo["joint_targets"]["joint_pos_target"][
+                    :, _DATASET_ARM_JOINT_POSITION_COLUMNS
+                ]
+                # DIAGNOSTIC (temporary, 2026-08-10): realized state, kept *separately* from
+                # the target used as the actual replayed action above. The tracking-fidelity
+                # question ("does Arena's arm end up where robofinals' arm ended up") needs
+                # realized-vs-realized -- comparing Arena's live state against robofinals'
+                # *target* instead (an earlier version of this diagnostic did exactly that,
+                # by reusing arm_joint_pos_ds for both roles) conflates Arena's own PD lag
+                # relative to its input with actual replay fidelity, and reads as a big
+                # regression that isn't real.
+                self._arm_joint_state_ds = demo["states"]["articulation"]["robot"]["joint_position"][
+                    :, _DATASET_ARM_JOINT_POSITION_COLUMNS
+                ]
+            # DIAGNOSTIC (temporary, 2026-08-10): recorded waist trajectory, to check
+            # whether Arena's own live waist_yaw/roll/pitch (driven by HOMIE_V2, not
+            # replayed directly like the arms) tracks the recording or drifts -- a waist
+            # yaw error would rotate the hand cameras sideways relative to the pieces even
+            # with perfect arm-joint replay and near-perfect pelvis tracking.
+            self._waist_joint_pos_ds = demo["states"]["articulation"]["robot"]["joint_position"][
+                :, _DATASET_WAIST_JOINT_POSITION_COLUMNS
+            ]
 
         n_frames = raw_actions.shape[0]
-        actions = np.zeros((n_frames, _ACTION_DIM), dtype=np.float32)
+        action_dim = _ACTION_DIM + len(_DATASET_ARM_JOINT_POSITION_COLUMNS) if config.replay_recorded_arm_joints else _ACTION_DIM
+        actions = np.zeros((n_frames, action_dim), dtype=np.float32)
         actions[:, _ARENA_WBC_SLICE] = raw_actions[:, _DATASET_WBC_SLICE]
         actions[:, _ARENA_LEFT_QUAT_XYZW_SLICE] = _wxyz_to_xyzw(raw_actions[:, _DATASET_LEFT_QUAT_WXYZ_SLICE])
         actions[:, _ARENA_RIGHT_QUAT_XYZW_SLICE] = _wxyz_to_xyzw(raw_actions[:, _DATASET_RIGHT_QUAT_WXYZ_SLICE])
@@ -152,6 +219,11 @@ class LightwheelHdf5ReplayPolicy(PolicyBase[LightwheelHdf5ReplayPolicyCfg]):
         # that embodiment with this policy.
         actions[:, _ARENA_LEFT_GRIPPER_SLICE] = raw_actions[:, _DATASET_LEFT_GRIPPER_IDX, None]
         actions[:, _ARENA_RIGHT_GRIPPER_SLICE] = raw_actions[:, _DATASET_RIGHT_GRIPPER_IDX, None]
+        if config.replay_recorded_arm_joints:
+            # Appended after the base 27-D action, matching
+            # G1WBCPinkDex1DirectArmContinuousGripActionCfg's field order (g1_action, then
+            # the two gripper terms, then arm_joint_override_action last).
+            actions[:, _ACTION_DIM:] = arm_joint_pos_ds
 
         self._sim_actions = torch.from_numpy(actions).to(self.device)
         self._step_idx = 0
@@ -185,6 +257,116 @@ class LightwheelHdf5ReplayPolicy(PolicyBase[LightwheelHdf5ReplayPolicyCfg]):
             self._apply_start_robot_pose(env)
             self._robot_pose_applied = True
         idx = min(self._step_idx, self._sim_actions.shape[0] - 1)
+        # DIAGNOSTIC (temporary, 2026-08-09): pelvis-to-table xy distance per step, to get a
+        # real number for the Agile-vs-Homie walking-offset comparison instead of eyeballing
+        # video. Remove once the Homie_v2 Dex1 investigation concludes.
+        import warp as wp
+
+        robot_data = env.unwrapped.scene["robot"].data
+        pelvis_xy = wp.to_torch(robot_data.root_link_pos_w)[0, :2].cpu().numpy()
+        dx, dy = (pelvis_xy - _ARENA_TABLE_POS[:2]).tolist()
+        dist = float(np.linalg.norm(pelvis_xy - _ARENA_TABLE_POS[:2]))
+        quat_xyzw = wp.to_torch(robot_data.root_link_quat_w)[0].cpu().numpy()
+        qx, qy, qz, qw = quat_xyzw
+        yaw_deg = float(np.degrees(np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))))
+        # DIAGNOSTIC (temporary, 2026-08-10): held_asset (leg001) world position, to check
+        # whether it's actually being lifted/held vs. staying put on the table.
+        leg_pos = wp.to_torch(env.unwrapped.scene["leg001"].data.root_link_pos_w)[0].cpu().numpy()
+        print(f"[lightwheel_hdf5_replay] step={self._step_idx} leg001_pos={leg_pos.tolist()}")
+        print(
+            f"[lightwheel_hdf5_replay] step={self._step_idx} pelvis_xy_dist_to_table={dist:.4f}"
+            f" dx={dx:.4f} dy={dy:.4f} yaw_deg={yaw_deg:.2f}"
+        )
+        # DIAGNOSTIC (temporary, 2026-08-10): live waist_yaw/roll/pitch vs. the recording's
+        # own -- these are HOMIE_V2's own output (not part of the direct arm-joint replay),
+        # so any drift here would rotate the hand cameras relative to the pieces even with
+        # perfect arm-joint replay and near-perfect pelvis tracking.
+        if not hasattr(self, "_waist_joint_sim_indices"):
+            self._waist_joint_sim_indices = [
+                robot_data.joint_names.index(name)
+                for name in ("waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint")
+            ]
+        live_waist = wp.to_torch(robot_data.joint_pos)[0, self._waist_joint_sim_indices].cpu().numpy()
+        recorded_waist = self._waist_joint_pos_ds[idx]
+        print(
+            f"[lightwheel_hdf5_replay] step={self._step_idx} waist_yaw/roll/pitch"
+            f" live={live_waist.tolist()} recorded={recorded_waist.tolist()}"
+        )
+        # DIAGNOSTIC (temporary, 2026-08-10): live arm joint positions vs. robofinals'
+        # *realized* recorded state (not the target fed in as the action) -- checks replay
+        # fidelity to the actual recording, not Arena's own PD tracking of its own input.
+        if getattr(self, "_arm_joint_state_ds", None) is not None:
+            if not hasattr(self, "_arm_joint_sim_indices"):
+                arm_joint_names = [
+                    "left_shoulder_pitch_joint",
+                    "right_shoulder_pitch_joint",
+                    "left_shoulder_roll_joint",
+                    "right_shoulder_roll_joint",
+                    "left_shoulder_yaw_joint",
+                    "right_shoulder_yaw_joint",
+                    "left_elbow_joint",
+                    "right_elbow_joint",
+                    "left_wrist_roll_joint",
+                    "right_wrist_roll_joint",
+                    "left_wrist_pitch_joint",
+                    "right_wrist_pitch_joint",
+                    "left_wrist_yaw_joint",
+                    "right_wrist_yaw_joint",
+                ]
+                self._arm_joint_names_for_diag = arm_joint_names
+                self._arm_joint_sim_indices = [robot_data.joint_names.index(name) for name in arm_joint_names]
+            live_arm = wp.to_torch(robot_data.joint_pos)[0, self._arm_joint_sim_indices].cpu().numpy()
+            recorded_arm = self._arm_joint_state_ds[idx]
+            error = live_arm - recorded_arm
+            per_joint = ", ".join(
+                f"{name}={err:+.4f}" for name, err in zip(self._arm_joint_names_for_diag, error.tolist())
+            )
+            print(f"[lightwheel_hdf5_replay] step={self._step_idx} arm_tracking_error {per_joint}")
+            # DIAGNOSTIC (temporary, 2026-08-10): computed vs. applied (post-clip) effort
+            # on the arm joints -- if computed >> applied at the same steps the tracking
+            # error above spikes, the PD command is hitting effort_limit and getting
+            # clamped (a torque *ceiling* problem, raising stiffness wouldn't fix it),
+            # not merely under-stiff gains. Looks each joint up by name across whichever
+            # actuator group owns it rather than assuming a single "arms" group, since
+            # G1_HOMIE_CFG's "default_implicit" mode splits arm joints across
+            # "arms_n5020"/"arms_w4010".
+            robot_asset = env.unwrapped.scene["robot"]
+            if not hasattr(self, "_arm_joint_actuator_lookup"):
+                self._arm_joint_actuator_lookup = {}
+                for actuator in robot_asset.actuators.values():
+                    for joint_idx, joint_name in enumerate(actuator.joint_names):
+                        if joint_name in self._arm_joint_names_for_diag:
+                            self._arm_joint_actuator_lookup[joint_name] = (actuator, joint_idx)
+            per_joint_effort_parts = []
+            for name in self._arm_joint_names_for_diag:
+                actuator, joint_idx = self._arm_joint_actuator_lookup[name]
+                c = actuator.computed_effort[0, joint_idx].item()
+                a = actuator.applied_effort[0, joint_idx].item()
+                if abs(c - a) > 0.01:
+                    per_joint_effort_parts.append(f"{name}=({c:+.2f}->{a:+.2f})")
+            if per_joint_effort_parts:
+                joined = ", ".join(per_joint_effort_parts)
+                print(f"[lightwheel_hdf5_replay] step={self._step_idx} arm_effort_saturated {joined}")
+        # DIAGNOSTIC (temporary, 2026-08-10): right_dex1_finger_joint_1 vs _2 live positions
+        # -- Jorge visually spotted the closed gripper looking asymmetric in Arena's replay
+        # (one side of the white finger cover exposing more of the black base than in the
+        # dataset video). Both fingers get the identical commanded target (verified against
+        # robofinals' own Dex1GripperCfg.process_hand, which duplicates one scalar across
+        # both joints) and identical actuator gains (single "grippers" IdealPDActuatorCfg
+        # group covering all 4 finger joints, isaaclab_arena/embodiments/g1/g1.py) -- so if
+        # they read back different positions here, it's a real per-finger divergence (most
+        # likely contact-driven: one finger touches the piece and stalls while the other,
+        # not yet touching, keeps moving toward the shared target), not a config bug.
+        if not hasattr(self, "_right_finger_sim_indices"):
+            self._right_finger_sim_indices = [
+                robot_data.joint_names.index(name)
+                for name in ("right_dex1_finger_joint_1", "right_dex1_finger_joint_2")
+            ]
+        right_fingers = wp.to_torch(robot_data.joint_pos)[0, self._right_finger_sim_indices].cpu().numpy()
+        print(
+            f"[lightwheel_hdf5_replay] step={self._step_idx} right_finger_joint_1={right_fingers[0]:+.5f}"
+            f" right_finger_joint_2={right_fingers[1]:+.5f} delta={right_fingers[0] - right_fingers[1]:+.5f}"
+        )
         self._step_idx += 1
         return self._sim_actions[idx].unsqueeze(0)
 

@@ -14,7 +14,7 @@ import isaaclab.sim as sim_utils  # noqa: F401
 import isaaclab.utils.math as PoseUtils
 import isaaclab_tasks.manager_based.manipulation.pick_place.mdp as mdp
 import warp as wp
-from isaaclab.actuators import IdealPDActuatorCfg
+from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLMimicEnv  # noqa: F401
 from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg, JointPositionActionCfg
@@ -219,6 +219,38 @@ class G1WBCPinkEmbodiment(G1EmbodimentBase):
         self.observation_config.wbc.concatenate_terms = self.concatenate_observation_terms
         self.observation_config.action.concatenate_terms = self.concatenate_observation_terms
         self.event_config = G1WBCPinkEventCfg()
+
+
+@register_asset
+class G1WBCPinkDex1Embodiment(G1WBCPinkEmbodiment):
+    """G1 with HOMIE_V2 WBC + PINK IK upper body, and the Dex1 2-finger gripper instead of the dexterous hand.
+
+    Fills the gap :class:`G1WBCAgilePinkDex1Embodiment` doesn't cover: that embodiment pairs
+    the Dex1 gripper with the AGILE lower-body policy, but the ``iros2026-ikea-assembly``
+    dataset was recorded with robofinals' HOMIE_V2-based controller
+    (``G1-Gripper-Controller-DecoupledWBC``), so open-loop replay against AGILE tracks the
+    recorded trajectory poorly (see :mod:`isaaclab_arena_gr00t.policy.lightwheel_hdf5_replay_policy`
+    for the diagnosed offset). ``scene_config`` (:data:`G1_HOMIE_GRIPPER_CFG`) and
+    ``action_config`` (:class:`G1WBCPinkDex1ActionCfg`) differ from
+    :class:`G1WBCPinkEmbodiment`; ``camera_config`` reuses :class:`G1AgileDex1CameraCfg` --
+    despite the name, nothing in it is AGILE-specific (it works around the Dex1 USD's
+    ``head_link`` not being a rigid body and reproduces robofinals' camera offsets).
+    """
+
+    name = "g1_wbc_pink_dex1"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        lock_waist: bool = False,
+    ):
+        super().__init__(enable_cameras, initial_pose, lock_waist)
+        self.scene_config = G1HomieDex1SceneCfg()
+        self.camera_config = G1AgileDex1CameraCfg()
+        self.action_config = G1WBCPinkDex1ActionCfg()
+        if lock_waist:
+            _remove_waist_from_pink_ik_action_config(self.action_config)
 
 
 @register_asset
@@ -621,6 +653,252 @@ G1_AGILE_CFG.actuators["waist"].armature = 0.03
 # challenge embodiment, which needs both (see _make_dex1_gripper_variant above).
 G1_AGILE_GRIPPER_CFG = _make_dex1_gripper_variant(G1_AGILE_CFG)
 
+# G1 articulation with leg/waist actuator gains matched to robofinals' G1_GEARWBC_CFG
+# (~2x stiffer than G1_CFG's stock values) -- the articulation HOMIE_V2 was actually
+# trained/recorded against. Briefly reverted to plain G1_CFG (2026-08-09), reasoning that
+# G1WBCPinkEmbodiment's own g1_homie_v2.yaml default_angles matches G1_CFG's stock init
+# pose, not G1_GEARWBC_CFG's deeper crouch -- but an A/B replay test against the
+# iros2026-ikea-assembly dataset showed that reasoning was wrong in practice: stock gains
+# tracked *worse* (pelvis-to-table distance drifted out to ~1.08m and stayed there, vs.
+# ~0.82m closest approach with these stiffer gains) and reproduced the same
+# far-from-table drift AGILE showed, whereas these stiffer gains kept the robot
+# meaningfully closer throughout. Restored. Separately (and NOT fixed by either gain
+# choice -- confirmed by testing both): dataset_first_person_cam still shows the robot's
+# quadriceps instead of feet at the same table-relative offset where the recording shows
+# feet -- that symptom's cause is still open, tracked separately from the gain choice.
+G1_HOMIE_CFG = G1_CFG.copy()
+# Leg/waist init pose matched to robofinals' G1_GEARWBC_CFG (2026-08-10) -- a much deeper
+# crouch than G1_CFG's stock pose (e.g. knee 0.653 rad vs. 0.3 rad). This isn't cosmetic:
+# g1_homie_v2.yaml's own `default_angles` (both robofinals' native copy and Arena's, byte
+# identical) is the *same* straight-pose values as G1_CFG's stock init state
+# (hip_pitch=-0.1, knee=0.3, ...) -- but robofinals' actual G1_GEARWBC_CFG-based robot
+# lives in the deep-crouch pose instead (confirmed against the HDF5 recording's own
+# frame-0 joint_position, which matches G1_GEARWBC_CFG's init state, not
+# default_angles). HOMIE_V2's observation normalizes qj as (actual_q - default_angles) --
+# robofinals' policy has therefore always seen a large, persistent, nonzero leg/waist
+# offset as its normal operating input throughout training and every real deployment.
+# G1_CFG's stock init pose instead gives HOMIE_V2 a near-zero offset from frame 0 --
+# an input distribution the policy never actually ran on. Candidate explanation for both
+# the yaw drift and the walking-speed undershoot measured earlier, still open as of the
+# actuator-model fix above.
+#
+# Arms added too (2026-08-11) -- initially skipped, reasoning that default_angles only has
+# 15 entries (12 legs + 3 waist) and g1_homie_policy.py zero-pads the rest for its "body"
+# group's arm indices, so there's no baseline-subtraction mismatch for arms the way there
+# is for legs/waist. True, but incomplete: HOMIE_V2 still observes the *raw* arm joint
+# values (zero-padded, not subtracted), so Arena's arms resetting to G1_CFG's all-zero
+# pose instead of G1_GEARWBC_CFG's small non-zero rest pose (e.g. left_elbow_joint=0.088
+# rad) is itself an out-of-distribution input at reset, separate from the
+# subtraction-formula argument above. Confirmed against the iros2026-ikea-assembly replay:
+# frame-0 arm_tracking_error (live state vs. the recording's own frame-0 joint_position)
+# matches this exact init-pose gap in both sign and magnitude (e.g. left_elbow_joint
+# ~-0.074 rad measured vs. -0.088 rad expected from the pose difference alone), decaying to
+# noise by step ~5 once the replayed target starts driving the joint -- a reset transient,
+# not the cause of the much larger, persistent mid-episode tracking gap during fast
+# reach/grasp motions (that one stays open, see the "arms" actuator comment below).
+G1_HOMIE_CFG.init_state.joint_pos.update(
+    {
+        "left_hip_pitch_joint": -0.389,
+        "right_hip_pitch_joint": -0.390,
+        "left_hip_roll_joint": 0.022,
+        "right_hip_roll_joint": -0.016,
+        "left_hip_yaw_joint": 0.025,
+        "right_hip_yaw_joint": -0.025,
+        "left_knee_joint": 0.653,
+        "right_knee_joint": 0.657,
+        "left_ankle_pitch_joint": -0.285,
+        "right_ankle_pitch_joint": -0.289,
+        "left_ankle_roll_joint": -0.007,
+        "right_ankle_roll_joint": 0.000,
+        "waist_yaw_joint": -0.000,
+        "waist_roll_joint": -0.000,
+        "waist_pitch_joint": 0.049,
+        "left_shoulder_pitch_joint": 0.027,
+        "right_shoulder_pitch_joint": 0.027,
+        "left_shoulder_roll_joint": 0.015,
+        "right_shoulder_roll_joint": -0.015,
+        "left_shoulder_yaw_joint": 0.035,
+        "right_shoulder_yaw_joint": -0.036,
+        "left_elbow_joint": 0.088,
+        "right_elbow_joint": 0.087,
+        "left_wrist_roll_joint": -0.011,
+        "right_wrist_roll_joint": 0.011,
+        "left_wrist_pitch_joint": 0.054,
+        "right_wrist_pitch_joint": 0.053,
+        "left_wrist_yaw_joint": -0.035,
+        "right_wrist_yaw_joint": 0.035,
+    }
+)
+# Gains + torque ceilings matched to robofinals' G1_GEARWBC_CFG (2026-08-09, A/B-verified
+# to improve pelvis-to-table tracking over G1_CFG's stock values). effort_limit changes
+# alone measured zero effect (bit-identical replay trajectories both times tested, for
+# legs and for waist_yaw) -- torque was never actually saturated, so they're kept for
+# correctness/parity with robofinals but aren't why tracking improved; the stiffness/
+# damping gains above are what did.
+G1_HOMIE_CFG.actuators["legs"].stiffness = {
+    ".*_hip_yaw_joint": 300.0,
+    ".*_hip_roll_joint": 300.0,
+    ".*_hip_pitch_joint": 300.0,
+    ".*_knee_joint": 600.0,
+}
+G1_HOMIE_CFG.actuators["legs"].damping = {
+    ".*_hip_yaw_joint": 4.0,
+    ".*_hip_roll_joint": 4.0,
+    ".*_hip_pitch_joint": 4.0,
+    ".*_knee_joint": 8.0,
+}
+G1_HOMIE_CFG.actuators["legs"].effort_limit = {
+    ".*_hip_yaw_joint": 200.0,
+    ".*_hip_roll_joint": 278.0,
+    ".*_hip_pitch_joint": 200.0,
+    ".*_knee_joint": 278.0,
+}
+G1_HOMIE_CFG.actuators["waist"].stiffness = {
+    "waist_yaw_joint": 500.0,
+    "waist_roll_joint": 500.0,
+    "waist_pitch_joint": 500.0,
+}
+G1_HOMIE_CFG.actuators["waist"].effort_limit = {
+    "waist_yaw_joint": 200.0,
+    "waist_roll_joint": 50.0,
+    "waist_pitch_joint": 50.0,
+}
+
+# Replaced 2026-08-09: robofinals' G1_GEARWBC_CFG uses ImplicitActuatorCfg for legs/waist
+# (PhysX integrates the PD law continuously, at the full 200Hz physics rate), while
+# G1_CFG's legs/waist used IdealPDActuatorCfg (an explicit PD law computed once per 50Hz
+# control step -- 4 physics substeps -- and held constant across all of them, per
+# IdealPDActuator's own docstring: "generally [less accurate] than the implicit actuator
+# ... when the simulation time-step is large"). Diagnosed as a candidate explanation for a
+# measured ~6deg yaw drift over the first ~4s of HDF5 replay that isn't present in the
+# recording itself (root_yaw stays within +-2deg there, torso_orientation_rpy_cmd is
+# [0,0,0] throughout) -- fast balance-correction dynamics within a single 20ms control
+# step are exactly where explicit-PD's "stale torque" approximation would show up.
+# effort_limit/velocity_limit above become effort_limit_sim/velocity_limit_sim for
+# implicit actuators (see ActuatorBaseCfg's own field docs) -- both actuator classes
+# otherwise share the same stiffness/damping/armature/friction field names.
+# "feet" (ankles) included too: robofinals' N5020-16 actuator covers ankles alongside
+# waist_roll/pitch as one implicit group -- initially missed this and left "feet" on
+# IdealPDActuatorCfg, which would undermine exactly the joints that generate forward
+# push-off during stance phase.
+#
+# friction deliberately NOT carried over from the IdealPD configs for "waist"/"feet":
+# G1_CFG's originals set friction=0.03 there, but neither of robofinals' matching
+# implicit groups (N7520-14.3, N5020-16) declares a friction field at all, and
+# IdealPDActuator.compute() never reads self.friction -- so that 0.03 was inert under
+# IdealPD. Under ImplicitActuator, friction gets set directly on the PhysX joint as real
+# Coulomb friction every physics substep. First attempt at this swap carried the 0.03
+# over unchanged and measured *worse* walking speed (0.095 m/s vs. 0.106 m/s with feet
+# left on IdealPD, vs. the recording's 0.140 m/s, all measured as pelvis-to-table closing
+# rate over the same 2.4s window). Dropping it fixed the yaw drift further (settles near
+# 0deg by ~14s instead of the +-2-5deg it still had with friction=0.03 present) but did
+# NOT recover the walking speed (still ~0.095-0.10 m/s, vs. IdealPD feet's 0.106 m/s) --
+# so something else is still damping forward propulsion specifically under the implicit
+# ankle drive, not yet found. Kept anyway for fidelity to robofinals' actual actuator
+# model rather than reverting to whichever config happens to score best on one metric.
+for _joint_group in ("legs", "waist", "feet"):
+    _ideal_cfg = G1_HOMIE_CFG.actuators[_joint_group]
+    G1_HOMIE_CFG.actuators[_joint_group] = ImplicitActuatorCfg(
+        joint_names_expr=_ideal_cfg.joint_names_expr,
+        effort_limit_sim=_ideal_cfg.effort_limit,
+        velocity_limit_sim=_ideal_cfg.velocity_limit,
+        stiffness=_ideal_cfg.stiffness,
+        damping=_ideal_cfg.damping,
+        armature=_ideal_cfg.armature,
+    )
+
+# Tried 2026-08-10: swapping "arms" to ImplicitActuatorCfg with robofinals' own per-joint
+# gains too (G1_IMPLICIT_ARM_JOINT_PARAMS, robofinals' default "new_implicit" arm mode --
+# see assets_cfg.py's _g1_arm_actuator_mode(), aliased from "sysid_implicit"), mirroring
+# the legs/waist/feet swap above. Reverted: measured to destabilize the sim (yaw drift
+# grew unbounded, -19.94deg by step 644, worse than any prior config) and Jorge observed
+# the right arm specifically hanging limp on the table, never lifting, for the whole
+# replay. Matches the data: unlike G1_CFG's symmetric round-number gains, robofinals'
+# per-joint values are real per-unit motor sysid (non-round, e.g. 1.937315464) with large
+# left/right asymmetry a designed config wouldn't have -- right_shoulder_yaw_joint's
+# effort_limit in particular is 7.0 N*m vs. left_shoulder_yaw_joint's 229.0 N*m, nowhere
+# near enough torque to hold the arm's own weight against gravity. Whether that 7.0 is a
+# real quirk of one physical unit's motor or a transcription issue upstream in robofinals'
+# own file wasn't determined; either way this specific value set isn't a safe drop-in
+# without whatever compensation robofinals' real pipeline pairs it with.
+#
+# Tried again 2026-08-10, this time with robofinals' *other* arm actuator mode --
+# "default_implicit" (assets_cfg.py's _g1_gearwbc_n5020_joint_names/_stiffness/_damping
+# and _g1_gearwbc_stock_w4010_actuators, selected when LW_G1_ARM_ACTUATOR="default"/
+# "default_implicit"/"stock_implicit"). Unlike "new_implicit"'s per-unit motor sysid, this
+# one is symmetric, round-number gains -- looks designed for sim, not measured off one
+# physical unit. Motivated by a real, measured tracking-lag problem: with "arms" still on
+# G1_CFG's stock IdealPDActuatorCfg, direct-replayed arm joints lagged their recorded
+# target by up to ~15deg during the fast reach/grasp segment (step 219,
+# left_wrist_roll_joint) despite the actuator's own computed/applied effort NOT being
+# saturated at those same steps (ruled out by directly diffing IdealPDActuator's
+# computed_effort vs. applied_effort) -- pointing at IdealPD's per-control-step "stale
+# torque held across 4 physics substeps" behavior (see the legs/waist/feet comment above)
+# rather than insufficient effort_limit.
+#
+# Reverted again: this run didn't crash (0 arm_effort_saturated events in 1000 steps,
+# ruling out torque saturation even more conclusively) but measured *worse* than the
+# IdealPD baseline on the one ground-truth metric available -- object_moved_rate dropped
+# to 0.0, vs. 1.0 on each of the three immediately preceding IdealPD-arm runs (same
+# held-asset mapping, same PhysX scene params). Peak tracking error was also larger, not
+# smaller: right_elbow_joint hit +0.50rad (~29deg) at step 205, more than double
+# IdealPD's worst point (~0.26rad/15deg). So "default_implicit" doesn't fix the lag either
+# -- the IdealPD-staleness hypothesis is unconfirmed for arms specifically (it *was*
+# confirmed for legs/waist/feet, where switching to Implicit measurably fixed yaw drift).
+#
+# Checked which mode robofinals actually uses before giving up on this thread:
+# LW_G1_ARM_ACTUATOR is never set anywhere in their workspace (grepped every .py/.yaml/
+# .yml/.json/.sh/.env/.cfg/.toml/.md) -- meaning their own code always falls through to
+# _g1_arm_actuator_mode()'s default, "new_implicit", i.e. the same real per-joint sysid
+# data already ruled unsafe above. No gravity-compensation/feedforward term exists
+# anywhere in their G1 control code that would explain how right_shoulder_yaw_joint's
+# 7.0 N*m effort_limit survives under a raw implicit PD in their own sim. The HDF5's own
+# env_args metadata (checked exhaustively, recursive key search for
+# actuator/stiffness/damping/effort/gain/arm) contains no actuator config at all, so
+# there's no way to empirically confirm which mode recorded this specific dataset either.
+# Net effect at the time: Arena looked like it was already matching robofinals' real
+# default here, with the remaining mismatch being something else. Two things changed
+# since, both 2026-08-10: (1) confirmed no gravity-compensation term exists anywhere in
+# robofinals' G1 code to explain how right_shoulder_yaw_joint's 7.0 N*m effort_limit would
+# survive a raw implicit PD -- unresolved, noted as a real open risk, not a green light;
+# (2) found and fixed a real bug in lightwheel_hdf5_replay_policy.py: the direct-arm-replay
+# action was sourced from states/.../joint_position (robofinals' own realized, already-
+# PD-lagged state) instead of joint_targets/joint_pos_target (their actual PD setpoint).
+# Fixing that lowered arm tracking error against the recording but only modestly
+# (right_elbow_joint's peak went ~0.50rad -> ~0.48rad, still under plain IdealPD) --
+# meaning a real actuator-dynamics gap remains on top of the reference-signal bug, and
+# IdealPD is definitely not what robofinals uses (their only real default is
+# "new_implicit"). Worth retrying now that the replayed target itself is correct.
+#
+# Third attempt, retrying "new_implicit" with one concrete fix over the first attempt:
+# this time included the `friction` field too (the legs/waist/feet swap above
+# deliberately drops friction -- there it was a spurious IdealPD leftover with no effect
+# until Implicit made it real Coulomb friction -- but mirroring that pattern too literally
+# meant the first arms attempt above silently dropped robofinals' real non-zero per-joint
+# friction values as well, e.g. 1.01 N*m for left_shoulder_pitch_joint, which robofinals'
+# own new_implicit_arms actuator does set).
+#
+# Reverted a third time: friction did fix the *stability* problem (no more unbounded yaw
+# drift -- settled at a steady ~3.3deg for the whole episode, and object_moved_rate=1.0)
+# but made *tracking* measurably worse, not better: right_elbow_joint's peak error grew
+# to +1.03rad (~59deg) at step 210, more than double IdealPD's +0.48rad, and still
+# climbing (not turning over) from step 208 to 211 -- the signature of sustained torque
+# saturation, not a transient lag spike. So it's 3 for 3 against Implicit-with-real-gains
+# for arms specifically (crashed with no friction, worse with default_implicit's
+# round-number gains, worse again with new_implicit's real gains once stabilized) --
+# unlike legs/waist/feet, where the same Ideal->Implicit swap was an unambiguous fix.
+# Real per-unit effort_limit values (e.g. right_elbow_joint=18.0 N*m) look genuinely
+# insufficient to track the recorded target's speed in Arena's own sim, whether because
+# that's also true in robofinals' own sim (and something else there compensates) or
+# because Arena's arm carries more effective inertia than robofinals' -- arm-link mass/
+# inertia in the `_wbc` USD variant is still the one lead never directly checked. "arms"
+# stays G1_CFG's stock IdealPDActuatorCfg -- the best-tracking, most stable config found
+# across all three attempts.
+
+# HOMIE_V2-tuned legs/waist gains plus the Dex1 gripper -- the missing combination for
+# the IKEA challenge embodiment (see G1WBCPinkDex1Embodiment below).
+G1_HOMIE_GRIPPER_CFG = _make_dex1_gripper_variant(G1_HOMIE_CFG)
+
 
 @configclass
 class G1SceneCfg:
@@ -639,6 +917,18 @@ class G1AgileDex1SceneCfg(G1AgileSceneCfg):
     """G1 scene config with AGILE actuator gains and the Dex1 2-finger gripper."""
 
     robot: ArticulationCfg = G1_AGILE_GRIPPER_CFG.copy()
+
+
+@configclass
+class G1HomieDex1SceneCfg(G1SceneCfg):
+    """G1 scene config with HOMIE_V2-tuned actuator gains and the Dex1 2-finger gripper.
+
+    See :data:`G1_HOMIE_CFG`'s comment for why HOMIE_V2 uses these robofinals-matched
+    gains rather than G1_CFG's stock ones -- confirmed by an A/B replay test, not just
+    reasoning from the training-time yaml.
+    """
+
+    robot: ArticulationCfg = G1_HOMIE_GRIPPER_CFG.copy()
 
 
 @configclass
@@ -1082,6 +1372,57 @@ class G1WBCAgilePinkDex1ContinuousGripActionCfg(G1WBCAgilePinkActionCfg):
     )
 
 
+@configclass
+class G1WBCPinkDex1ActionCfg(G1WBCPinkActionCfg):
+    """Action specifications for G1 HOMIE_V2 WBC + PINK IK upper body, with the Dex1 2-finger gripper.
+
+    Unlike :class:`G1WBCAgilePinkDex1ActionCfg`, this extends :class:`G1WBCPinkActionCfg`
+    (not the AGILE config) and does not add any joints to ``upperbody_extra_active_joints``:
+    HOMIE_V2's lower-body policy already drives all 3 waist joints itself (unlike AGILE's
+    12-leg-only lower body), so handing them to PINK IK too would fight the WBC policy's own
+    waist targets. Gripper action terms otherwise mirror
+    :class:`G1WBCAgilePinkDex1ActionCfg` -- see its docstring for why they don't need changes
+    to the WBC/IK pipeline itself.
+    """
+
+    left_gripper_action: ActionTermCfg = BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["left_dex1_finger_joint_1", "left_dex1_finger_joint_2"],
+        open_command_expr={"left_dex1_finger_joint_.*": 0.0245},
+        close_command_expr={"left_dex1_finger_joint_.*": -0.02},
+    )
+    right_gripper_action: ActionTermCfg = BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["right_dex1_finger_joint_1", "right_dex1_finger_joint_2"],
+        open_command_expr={"right_dex1_finger_joint_.*": 0.0245},
+        close_command_expr={"right_dex1_finger_joint_.*": -0.02},
+    )
+
+
+@configclass
+class G1WBCPinkDex1ContinuousGripActionCfg(G1WBCPinkActionCfg):
+    """Like :class:`G1WBCPinkDex1ActionCfg`, but with continuous (non-binary) Dex1 finger control.
+
+    Diagnostic-only, for replaying robofinals-recorded gripper commands faithfully -- see
+    :class:`G1WBCAgilePinkDex1ContinuousGripActionCfg` for the interpolation this reproduces.
+    """
+
+    left_gripper_action: ActionTermCfg = JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["left_dex1_finger_joint_1", "left_dex1_finger_joint_2"],
+        scale=-0.02225,
+        offset=0.00225,
+        use_default_offset=False,
+    )
+    right_gripper_action: ActionTermCfg = JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["right_dex1_finger_joint_1", "right_dex1_finger_joint_2"],
+        scale=-0.02225,
+        offset=0.00225,
+        use_default_offset=False,
+    )
+
+
 @register_asset
 class G1WBCAgilePinkDex1ContinuousGripEmbodiment(G1WBCAgilePinkDex1Embodiment):
     """Same as :class:`G1WBCAgilePinkDex1Embodiment`, but with continuous Dex1 gripper control.
@@ -1104,8 +1445,103 @@ class G1WBCAgilePinkDex1ContinuousGripEmbodiment(G1WBCAgilePinkDex1Embodiment):
             _remove_waist_from_pink_ik_action_config(self.action_config)
 
 
+@register_asset
+class G1WBCPinkDex1ContinuousGripEmbodiment(G1WBCPinkDex1Embodiment):
+    """Same as :class:`G1WBCPinkDex1Embodiment`, but with continuous Dex1 gripper control.
+
+    Diagnostic-only variant for replaying robofinals HDF5 actions faithfully -- see
+    :class:`G1WBCPinkDex1ContinuousGripActionCfg`.
+    """
+
+    name = "g1_wbc_pink_dex1_continuous_grip"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        lock_waist: bool = False,
+    ):
+        super().__init__(enable_cameras, initial_pose, lock_waist)
+        self.action_config = G1WBCPinkDex1ContinuousGripActionCfg()
+        if lock_waist:
+            _remove_waist_from_pink_ik_action_config(self.action_config)
+
+
+# Arm joint names, in the exact order robofinals' recorded
+# states/articulation/robot/joint_position array uses (verified 2026-08-09 by matching
+# frame-0 values against G1_GEARWBC_CFG's own init_state.joint_pos).
+DATASET_ARM_JOINT_NAMES = [
+    "left_shoulder_pitch_joint",
+    "right_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "right_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "right_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "right_elbow_joint",
+    "left_wrist_roll_joint",
+    "right_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_wrist_yaw_joint",
+]
+
+
+@configclass
+class G1WBCPinkDex1DirectArmContinuousGripActionCfg(G1WBCPinkDex1ContinuousGripActionCfg):
+    """Like :class:`G1WBCPinkDex1ContinuousGripActionCfg`, but replays the dataset's recorded
+    arm joint angles directly instead of re-deriving them via Pink IK from the wrist
+    Cartesian targets.
+
+    Diagnostic-only. Pink IK for a 7-DOF arm reaching a 6-DOF wrist target has one
+    redundant DOF -- the same wrist target admits a family of elbow/shoulder solutions,
+    and which one Pink IK converges to depends on solver warm-start, not just the target.
+    Since HOMIE_V2's own observation includes arm joint positions (the robot_model's
+    "body" group spans lower_body + upper_body_no_hands, see g1_homie_policy.py's
+    compute_observation), a different-but-valid IK solution here feeds the WBC policy a
+    different observation than robofinals' own recording had, which could bias its leg
+    output -- diagnosed 2026-08-09 as a candidate explanation for the residual
+    pelvis-to-table gap left after matching gains/effort_limit/mass. This term overrides
+    whatever ``g1_action``'s Pink IK computed for the 14 arm joints with the recorded
+    ``joint_position`` values directly (declared after ``g1_action``, so it applies after
+    and wins -- the same mechanism the gripper terms use), removing IK solution
+    multiplicity as a source of divergence.
+    """
+
+    arm_joint_override_action: ActionTermCfg = JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=DATASET_ARM_JOINT_NAMES,
+        preserve_order=True,
+        scale=1.0,
+        offset=0.0,
+        use_default_offset=False,
+    )
+
+
+@register_asset
+class G1WBCPinkDex1DirectArmContinuousGripEmbodiment(G1WBCPinkDex1ContinuousGripEmbodiment):
+    """Same as :class:`G1WBCPinkDex1ContinuousGripEmbodiment`, but replays recorded arm
+    joint angles directly instead of re-deriving them via Pink IK -- see
+    :class:`G1WBCPinkDex1DirectArmContinuousGripActionCfg`.
+    """
+
+    name = "g1_wbc_pink_dex1_direct_arm_continuous_grip"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        lock_waist: bool = False,
+    ):
+        super().__init__(enable_cameras, initial_pose, lock_waist)
+        self.action_config = G1WBCPinkDex1DirectArmContinuousGripActionCfg()
+        if lock_waist:
+            _remove_waist_from_pink_ik_action_config(self.action_config)
+
+
 def _remove_waist_from_pink_ik_action_config(
-    action_config: G1WBCPinkActionCfg | G1WBCAgilePinkActionCfg,
+    action_config: G1WBCPinkActionCfg | G1WBCAgilePinkActionCfg | G1WBCPinkDex1ActionCfg | G1WBCPinkDex1ContinuousGripActionCfg,
 ) -> None:
     """Remove waist joints from a Pink IK action config's extra active joint set."""
     action_config.g1_action.upperbody_extra_active_joints = [
@@ -1122,6 +1558,10 @@ class G1WBCJointEventCfg:
     reset_all = EventTerm(func=reset_all_articulation_joints, mode="reset")
     reset_wbc_policy = EventTerm(func=g1_events_mdp.reset_decoupled_wbc_joint_policy, mode="reset")
     apply_high_friction_to_g1_fingers: EventTerm | None = None
+    # See fix_pelvis_contour_link_mass's docstring: Arena's Nucleus G1 USD ships this link
+    # at 0.001kg instead of the ~10kg (battery) mass the AGILE/HOMIE_V2 checkpoints were
+    # trained against. Applied for every G1 embodiment, not just HOMIE_V2/Dex1 ones.
+    fix_pelvis_contour_link_mass = EventTerm(func=g1_events_mdp.fix_pelvis_contour_link_mass, mode="prestartup")
 
 
 @configclass
@@ -1131,6 +1571,10 @@ class G1WBCPinkEventCfg:
     reset_all = EventTerm(func=reset_all_articulation_joints, mode="reset")
     reset_wbc_policy = EventTerm(func=g1_events_mdp.reset_decoupled_wbc_pink_policy, mode="reset")
     apply_high_friction_to_g1_fingers: EventTerm | None = None
+    # See fix_pelvis_contour_link_mass's docstring: Arena's Nucleus G1 USD ships this link
+    # at 0.001kg instead of the ~10kg (battery) mass the AGILE/HOMIE_V2 checkpoints were
+    # trained against. Applied for every G1 embodiment, not just HOMIE_V2/Dex1 ones.
+    fix_pelvis_contour_link_mass = EventTerm(func=g1_events_mdp.fix_pelvis_contour_link_mass, mode="prestartup")
 
 
 class G1MimicEnv(ManagerBasedRLMimicEnv):
