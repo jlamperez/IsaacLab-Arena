@@ -1,0 +1,73 @@
+# Copyright (c) 2026, The Isaac Lab Arena Project Developers (https://github.com/isaac-sim/IsaacLab-Arena/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Gr00tDatasetConfig Example Configuration
+# Converts the merged LightwheelAI/iros2026-ikea-assembly dataset (robofinals-recorded G1+Dex1
+# IKEA table assembly, see isaaclab_arena/scripts/imitation_learning/filter_successful_demos.py
+# + merge_demos.py --success_only for how the merged HDF5 is produced) to GR00T-LeRobot format.
+
+# Root directory for all data storage
+data_root: "/datasets/lerobot_cache/LightwheelAI/iros2026-ikea-assembly/merged"
+
+# Instruction given to the policy in natural language
+language_instruction: "Assemble the table leg into the tabletop"
+task_index: 0
+
+# Name of the HDF5 file to use for the dataset (output of merge_demos.py --success_only)
+hdf5_name: "iros2026_ikea_assembly_merged.hdf5"
+
+# HDF5 datafield names -- this dataset's own schema (Isaac Lab record_demos.py-style, not
+# Mimic-generated), not the Mimic obs/-nested state or camera_obs/ video group this converter
+# otherwise defaults to.
+state_name_sim: "joint_position"
+state_group_path: "states/articulation/robot"
+action_name_sim: "actions"
+action_source: "lightwheel_wbc_command"
+# actions/states/videos are already co-indexed in this dataset (verified 2026-08-14 across all
+# 300 source files), unlike Arena's own Mimic recorder convention.
+trim_last_state_frame: false
+pov_cam_names_sim: ["first_person_camera_rgb", "left_hand_camera_rgb", "right_hand_camera_rgb"]
+
+# Gr00t-LeRobot datafield names
+state_name_lerobot: "observation.state"
+action_name_lerobot: "action"
+video_name_lerobot: "observation.images.ego_view"
+video_names_lerobot:
+  ["observation.images.ego_view", "observation.images.left_hand", "observation.images.right_hand"]
+task_description_lerobot: "annotation.human.task_description"
+
+# Parquet configuration
+chunks_size: 1000
+
+# Video configuration -- confirmed 2026-08-14 from env_args.sim_args (dt=0.005, decimation=4),
+# uniform across all 300 source files.
+fps: 50
+
+# File path templates
+data_path: "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+video_path: "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+
+# Configuration file paths
+modality_template_path: "isaaclab_arena_gr00t/embodiments/g1_dex1_ikea_lightwheel/modality.json"
+modality_fname: "modality.json"
+episodes_fname: "episodes.jsonl"
+tasks_fname: "tasks.jsonl"
+info_template_path: "isaaclab_arena_gr00t/embodiments/g1_dex1_ikea_lightwheel/info.json"
+info_fname: "info.json"
+
+# policy specific parameters (gr00t demonstration data stored in lerobot format)
+policy_joints_config_path: "isaaclab_arena_gr00t/embodiments/g1_dex1_ikea_lightwheel/gr00t_policy_joint_space.yaml"
+robot_type: "G1-Gripper-Controller-DecoupledWBC"
+
+# Robot simulation specific parameters. action_joints_config_path must point at a valid file to
+# satisfy Gr00tDatasetConfig's existence check, but is unused for data in lightwheel_wbc_command
+# mode (the raw action isn't a named-joint array, see convert_hdf5_to_lerobot.py).
+action_joints_config_path: "isaaclab_arena_gr00t/embodiments/g1_dex1_ikea_lightwheel/33dof_joint_space.yaml"
+state_joints_config_path: "isaaclab_arena_gr00t/embodiments/g1_dex1_ikea_lightwheel/33dof_joint_space.yaml"
+
+# Image configuration (height, width, channels) -- this dataset's cameras are already 224x224,
+# no resize needed.
+original_image_size: [224, 224, 3]
+target_image_size: [224, 224, 3]

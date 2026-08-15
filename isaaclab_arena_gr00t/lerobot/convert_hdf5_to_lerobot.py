@@ -32,6 +32,77 @@ from isaaclab_arena_gr00t.utils.joints_conversion import remap_sim_joints_to_pol
 from isaaclab_arena_gr00t.utils.robot_eef_pose import EefPose
 from isaaclab_arena_gr00t.utils.robot_joints import JointsAbsPosition
 
+# robofinals' G1-Gripper-Controller-DecoupledWBC packed 23-D action column layout, ported from
+# isaaclab_arena_gr00t/policy/lightwheel_hdf5_replay_policy.py's _DATASET_* slice constants (see
+# that file's module docstring for the full derivation/verification notes). Unlike that file's own
+# use (which feeds Arena's xyzw-expecting action term), the quaternions here are left in their
+# recorded wxyz order -- EefPose.from_array expects wxyz natively, so no reorder is needed here.
+_LIGHTWHEEL_ACTION_DIM = 23
+_LIGHTWHEEL_LEFT_GRIPPER_SLICE = slice(0, 1)
+_LIGHTWHEEL_RIGHT_GRIPPER_SLICE = slice(1, 2)
+_LIGHTWHEEL_LEFT_EEF_POS_SLICE = slice(2, 5)
+_LIGHTWHEEL_LEFT_EEF_QUAT_WXYZ_SLICE = slice(5, 9)
+_LIGHTWHEEL_RIGHT_EEF_POS_SLICE = slice(9, 12)
+_LIGHTWHEEL_RIGHT_EEF_QUAT_WXYZ_SLICE = slice(12, 16)
+_LIGHTWHEEL_NAVIGATE_CMD_SLICE = slice(16, 19)
+_LIGHTWHEEL_BASE_HEIGHT_CMD_SLICE = slice(19, 20)
+_LIGHTWHEEL_TORSO_RPY_CMD_SLICE = slice(20, 23)
+# Column labels for the raw 23-D action, in order -- used to name the "action" feature in
+# get_feature_info since it isn't a named-joint array like the joint_array action_source.
+_LIGHTWHEEL_ACTION_COLUMN_NAMES = [
+    "left_gripper",
+    "right_gripper",
+    "left_eef_pos_x",
+    "left_eef_pos_y",
+    "left_eef_pos_z",
+    "left_eef_quat_w",
+    "left_eef_quat_x",
+    "left_eef_quat_y",
+    "left_eef_quat_z",
+    "right_eef_pos_x",
+    "right_eef_pos_y",
+    "right_eef_pos_z",
+    "right_eef_quat_w",
+    "right_eef_quat_x",
+    "right_eef_quat_y",
+    "right_eef_quat_z",
+    "navigate_cmd_x",
+    "navigate_cmd_y",
+    "navigate_cmd_yaw",
+    "base_height_cmd",
+    "torso_rpy_cmd_roll",
+    "torso_rpy_cmd_pitch",
+    "torso_rpy_cmd_yaw",
+]
+
+
+def decompose_lightwheel_wbc_action(raw_actions: np.ndarray) -> dict[str, np.ndarray]:
+    """Split robofinals' packed 23-D G1-Gripper-Controller-DecoupledWBC action into named parts.
+
+    Args:
+        raw_actions: The dataset's raw action array, shape ``(T, 23)``.
+
+    Returns:
+        A dict with keys ``left_gripper``/``right_gripper`` (``(T, 1)``), ``left_eef_pos``/
+        ``right_eef_pos`` (``(T, 3)``), ``left_eef_quat``/``right_eef_quat`` (``(T, 4)``, wxyz),
+        ``navigate_cmd`` (``(T, 3)``), ``base_height_cmd`` (``(T, 1)``), ``torso_rpy_cmd``
+        (``(T, 3)``).
+    """
+    assert raw_actions.shape[1] == _LIGHTWHEEL_ACTION_DIM, (
+        f"expected a {_LIGHTWHEEL_ACTION_DIM}-D lightwheel WBC action, got shape {raw_actions.shape}"
+    )
+    return {
+        "left_gripper": raw_actions[:, _LIGHTWHEEL_LEFT_GRIPPER_SLICE],
+        "right_gripper": raw_actions[:, _LIGHTWHEEL_RIGHT_GRIPPER_SLICE],
+        "left_eef_pos": raw_actions[:, _LIGHTWHEEL_LEFT_EEF_POS_SLICE],
+        "left_eef_quat": raw_actions[:, _LIGHTWHEEL_LEFT_EEF_QUAT_WXYZ_SLICE],
+        "right_eef_pos": raw_actions[:, _LIGHTWHEEL_RIGHT_EEF_POS_SLICE],
+        "right_eef_quat": raw_actions[:, _LIGHTWHEEL_RIGHT_EEF_QUAT_WXYZ_SLICE],
+        "navigate_cmd": raw_actions[:, _LIGHTWHEEL_NAVIGATE_CMD_SLICE],
+        "base_height_cmd": raw_actions[:, _LIGHTWHEEL_BASE_HEIGHT_CMD_SLICE],
+        "torso_rpy_cmd": raw_actions[:, _LIGHTWHEEL_TORSO_RPY_CMD_SLICE],
+    }
+
 
 def wait_for_video_completion(video_path: str, max_wait_time: int = 60, check_interval: float = 0.5) -> bool:
     """
@@ -197,10 +268,16 @@ def get_feature_info(
             "shape": shape,
         }
         # State & action
-        if column in [config.lerobot_keys["state"], config.lerobot_keys["action"]]:
+        if column == config.lerobot_keys["state"] or (
+            column == config.lerobot_keys["action"] and config.action_source == "joint_array"
+        ):
             dof = column_data.shape[1]
             assert dof == len(policy_joints_names)
             features[column]["names"] = [f"{policy_joints_names[i]}" for i in range(dof)]
+        elif column == config.lerobot_keys["action"] and config.action_source == "lightwheel_wbc_command":
+            dof = column_data.shape[1]
+            assert dof == len(_LIGHTWHEEL_ACTION_COLUMN_NAMES)
+            features[column]["names"] = list(_LIGHTWHEEL_ACTION_COLUMN_NAMES)
 
     return features
 
@@ -211,7 +288,8 @@ def extract_teleop_command(trajectory: h5py.Dataset, teleop_key: str, config: Gr
     """
     assert "action" in trajectory.keys()
     assert teleop_key in config.hdf5_keys
-    teleop_command = trajectory["action"][config.hdf5_keys[teleop_key]][:-1]
+    trim = slice(None, -1) if config.trim_last_state_frame else slice(None)
+    teleop_command = trajectory["action"][config.hdf5_keys[teleop_key]][trim]
     return [row for row in teleop_command]
 
 
@@ -331,14 +409,26 @@ def convert_trajectory_to_df(
     """Get joints state/action/timestamp from HDF5 file"""
     length = None
     assert "obs" in trajectory.keys()
+    trim = slice(None, -1) if config.trim_last_state_frame else slice(None)
+    if config.state_group_path is not None:
+        state_group = trajectory
+        for part in config.state_group_path.split("/"):
+            state_group = state_group[part]
+    else:
+        state_group = trajectory["obs"]
+
     for key, hdf5_key_name in config.hdf5_keys.items():
         if key not in ["state", "action"]:
+            continue
+        if key == "action" and config.action_source == "lightwheel_wbc_command":
+            # Handled separately below -- not a named-joint array, doesn't go through the
+            # policy_joints_config remap this loop applies to state (and joint_array actions).
             continue
         lerobot_key_name = config.lerobot_keys[key]
         # state
         if key == "state":
-            assert hdf5_key_name in trajectory["obs"].keys()
-            joints = trajectory["obs"][hdf5_key_name]
+            assert hdf5_key_name in state_group.keys()
+            joints = state_group[hdf5_key_name]
         # action target
         else:
             assert hdf5_key_name in trajectory.keys()
@@ -346,12 +436,12 @@ def convert_trajectory_to_df(
         # state
         if key == "state":
             # NOTE(xinjieyao, 2025-09-25): remove the last obs due to Lab reports observations
-            joints = joints[:-1]
+            joints = joints[trim]
             input_joints_config = state_joints_config
         # action target
         elif key == "action":
             # NOTE(xinjieyao, 2025-09-25): remove the last idle action due to Lab reports actions
-            joints = joints[:-1]
+            joints = joints[trim]
             input_joints_config = action_joints_config
         else:
             raise ValueError(f"Unknown key: {key}")
@@ -390,6 +480,29 @@ def convert_trajectory_to_df(
         concatenated = np.concatenate(ordered_joints, axis=1)
         data[lerobot_key_name] = [row for row in concatenated]
 
+    if config.action_source == "lightwheel_wbc_command":
+        raw_action_hdf5_key = config.hdf5_keys["action"]
+        assert raw_action_hdf5_key in trajectory.keys()
+        raw_actions = np.asarray(trajectory[raw_action_hdf5_key])[trim]
+        data[config.lerobot_keys["action"]] = [row for row in raw_actions]
+
+        wbc_parts = decompose_lightwheel_wbc_action(raw_actions)
+        left_eef_pose = EefPose.from_array(wbc_parts["left_eef_pos"], wbc_parts["left_eef_quat"], device="cpu")
+        right_eef_pose = EefPose.from_array(wbc_parts["right_eef_pos"], wbc_parts["right_eef_quat"], device="cpu")
+        eef_pose = np.concatenate(
+            [left_eef_pose.get_eef_pose().numpy(), right_eef_pose.get_eef_pose().numpy()], axis=1
+        ).astype(np.float64)
+        data[config.lerobot_keys["action_eef_pose"]] = [row for row in eef_pose]
+
+        gripper = np.concatenate([wbc_parts["left_gripper"], wbc_parts["right_gripper"]], axis=1)
+        data[config.lerobot_keys["action_gripper"]] = [row for row in gripper]
+
+        data[config.lerobot_keys["teleop_navigate_command"]] = [row for row in wbc_parts["navigate_cmd"]]
+        data[config.lerobot_keys["teleop_base_height_command"]] = [row for row in wbc_parts["base_height_cmd"]]
+        data[config.lerobot_keys["teleop_torso_orientation_rpy_command"]] = [
+            row for row in wbc_parts["torso_rpy_cmd"]
+        ]
+
     assert len(data[config.lerobot_keys["action"]]) == len(data[config.lerobot_keys["state"]])
     length = len(data[config.lerobot_keys["action"]])
     data["timestamp"] = np.arange(length).astype(np.float64) * (1.0 / config.fps)
@@ -403,9 +516,9 @@ def convert_trajectory_to_df(
         eef_pose = {}
         for side in ["left", "right"]:
             if f"{side}_eef_pos" in config.hdf5_keys and f"{side}_eef_quat" in config.hdf5_keys:
-                side_eef_pos = trajectory[key][config.hdf5_keys[f"{side}_eef_pos"]]
-                side_eef_quat = trajectory[key][config.hdf5_keys[f"{side}_eef_quat"]]
-                side_eef_pose = EefPose.from_array(side_eef_pos[:-1], side_eef_quat[:-1], device="cpu")
+                side_eef_pos = trajectory[key][config.hdf5_keys[f"{side}_eef_pos"]][trim]
+                side_eef_quat = trajectory[key][config.hdf5_keys[f"{side}_eef_quat"]][trim]
+                side_eef_pose = EefPose.from_array(side_eef_pos, side_eef_quat, device="cpu")
                 eef_pose[side] = side_eef_pose.get_eef_pose()
         if "left" in eef_pose and "right" in eef_pose:
             eef_pose = np.concatenate([eef_pose["left"].numpy(), eef_pose["right"].numpy()], axis=1).astype(np.float64)
@@ -497,7 +610,11 @@ def convert_hdf5_to_lerobot(config: Gr00tDatasetConfig):
     trajectory_ids = list(hdf5_data.keys())
 
     episodes_info = []
-    for episode_index, trajectory_id in enumerate(tqdm(trajectory_ids)):
+    # A trajectory that fails to convert (e.g. a truncated recording) is skipped, not written --
+    # episode_index must count only what's actually written, or downstream consumers expecting
+    # contiguous episode_0..total_episodes-1 numbering hit a silent gap at the failed index.
+    episode_index = 0
+    for trajectory_id in tqdm(trajectory_ids):
 
         try:
             trajectory = hdf5_data[trajectory_id]
@@ -526,23 +643,34 @@ def convert_hdf5_to_lerobot(config: Gr00tDatasetConfig):
             "length": length,
         })
         # 2.3. Generate videos/
-        new_video_relpath = config.video_path.format(
-            episode_chunk=episode_chunk, video_key=config.lerobot_keys["video"], episode_index=episode_index
-        )
-        new_video_path = config.lerobot_data_dir / new_video_relpath
-        if config.video_name_lerobot not in video_paths.keys():
-            video_paths[config.video_name_lerobot] = new_video_path
+        if config.pov_cam_names_sim is not None:
+            camera_pairs = list(zip(config.pov_cam_names_sim, config.video_names_lerobot))
+            camera_group = trajectory["obs"]
+        else:
+            camera_pairs = [(config.pov_cam_name_sim, config.video_name_lerobot)]
+            camera_group = trajectory["camera_obs"]
 
-        assert config.pov_cam_name_sim in trajectory["camera_obs"]
+        for cam_key, video_key in camera_pairs:
+            assert cam_key in camera_group, f"{cam_key} not found in {camera_group}"
 
-        frames = np.array(trajectory["camera_obs"][config.pov_cam_name_sim])
-        # remove last frame due to how Lab reports observations
-        frames = frames[:-1]
-        assert len(frames) == length
-        queue.put((new_video_path, frames, config.fps, "image"))
+            new_video_relpath = config.video_path.format(
+                episode_chunk=episode_chunk, video_key=video_key, episode_index=episode_index
+            )
+            new_video_path = config.lerobot_data_dir / new_video_relpath
+            if video_key not in video_paths:
+                video_paths[video_key] = new_video_path
+
+            frames = np.array(camera_group[cam_key])
+            if config.trim_last_state_frame:
+                # remove last frame due to how Lab reports observations
+                frames = frames[:-1]
+            assert len(frames) == length
+            queue.put((new_video_path, frames, config.fps, "image"))
 
         if example_data is None:
             example_data = df_ret_dict
+
+        episode_index += 1
 
     # 3. Generate the rest of meta/
     # 3.1. Generate tasks.json
@@ -570,13 +698,15 @@ def convert_hdf5_to_lerobot(config: Gr00tDatasetConfig):
         for worker in workers:
             worker.join()
 
-        # 3.4. Generate info.json (AFTER all videos are created)
+        # 3.4. Generate info.json (AFTER all videos are created). Uses episode_index (the count
+        # of trajectories actually written), not len(trajectory_ids) (the raw source count) --
+        # they differ whenever one or more trajectories failed to convert and were skipped.
         info_json = generate_info(
-            total_episodes=len(trajectory_ids),
+            total_episodes=episode_index,
             total_frames=total_length,
             total_tasks=len(tasks),
-            total_videos=len(trajectory_ids),
-            total_chunks=len(trajectory_ids) // config.chunks_size,
+            total_videos=episode_index,
+            total_chunks=-(-episode_index // config.chunks_size),  # ceiling division
             step_data=example_data["data"],
             video_paths=video_paths,
             config=config,

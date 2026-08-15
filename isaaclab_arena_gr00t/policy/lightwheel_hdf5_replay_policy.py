@@ -131,7 +131,7 @@ _DATASET_WAIST_JOINT_POSITION_COLUMNS = [2, 5, 8]
 class LightwheelHdf5ReplayPolicyCfg(PolicyCfg):
     """Configure the LightwheelAI HDF5 ground-truth replay policy."""
 
-    hdf5_path: str = "/datasets/lightwheel_ikea/AssembleTableTask_1784627181912351.hdf5"
+    hdf5_path: str = "/datasets/lerobot_cache/LightwheelAI/iros2026-ikea-assembly/data/AssembleTableTask_1784627181912351.hdf5"
     """Path to a robofinals-format demo-recording HDF5 file (``data/<demo_name>/actions``)."""
 
     demo_name: str = "demo_0"

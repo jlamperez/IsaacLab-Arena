@@ -21,6 +21,13 @@ Compared to upstream ``submodules/IsaacLab/scripts/tools/merge_hdf5_datasets.py`
 - Logs an operator-friendly per-file summary and aggregate report.
 - Uses a recursive ``h5py.Group.copy`` so new recorder terms added by future Isaac Lab versions
   (new ``obs/*`` keys, new sensor groups, new metadata attrs) round-trip unchanged.
+- With ``--success_only``, drops individual ``demo_*`` groups whose ``success`` attribute is
+  ``False`` (or missing) while still copying the rest of that same file -- unlike pre-filtering
+  the input file list (e.g. via ``filter_successful_demos.py``), this doesn't discard an entire
+  file just because one of its demos failed.
+- With one or more ``--drop_subtree PATH``, excludes those group paths from both schema
+  validation and the merged output -- for recorder terms downstream consumers don't need and
+  that may not be uniform across inputs (e.g. per-session teleop-console diagnostics).
 
 The script has zero simulation dependency and only requires ``h5py``.
 
@@ -60,6 +67,9 @@ class _FileInfo:
     success_count: int = 0
     no_success_attr_count: int = 0
     failed_count: int = 0
+    total_steps_successful: int = 0
+    """Sum of ``num_samples`` across only the demos with ``success=True`` -- what ``--success_only``
+    would keep, used for the dry-run preview."""
     untracked_step_demos: list[str] = field(default_factory=list)
 
 
@@ -78,17 +88,27 @@ def _format_int(n: int) -> str:
     return f"{n:,}"
 
 
-def _build_schema_fingerprint(demo_group: h5py.Group) -> dict[str, tuple[tuple[int, ...], str]]:
+def _matches_dropped_subtree(path: str, drop_subtrees: list[str]) -> bool:
+    """True if ``path`` is at or under one of ``drop_subtrees`` (``/``-separated group paths)."""
+    return any(path == subtree or path.startswith(subtree + "/") for subtree in drop_subtrees)
+
+
+def _build_schema_fingerprint(
+    demo_group: h5py.Group, drop_subtrees: list[str] | None = None
+) -> dict[str, tuple[tuple[int, ...], str]]:
     """Walk a demo group recursively and produce a ``path -> (shape[1:], dtype_str)`` map.
 
     The leading time dimension is dropped because episode lengths legitimately vary across demos.
     Everything else (action_dim, obs feature dim, image HxWxC, ...) must match for the merged
-    dataset to be usable by downstream consumers.
+    dataset to be usable by downstream consumers. Paths under ``drop_subtrees`` are excluded, since
+    ``--drop_subtree`` removes them from the merged output anyway -- their compatibility across
+    inputs doesn't matter.
     """
+    drop_subtrees = drop_subtrees or []
     fingerprint: dict[str, tuple[tuple[int, ...], str]] = {}
 
     def _visit(name: str, obj: h5py.Group | h5py.Dataset) -> None:
-        if isinstance(obj, h5py.Dataset):
+        if isinstance(obj, h5py.Dataset) and not _matches_dropped_subtree(name, drop_subtrees):
             fingerprint[name] = (tuple(obj.shape[1:]), obj.dtype.str)
 
     demo_group.visititems(_visit)
@@ -108,7 +128,19 @@ def _sorted_demo_names(data_group: h5py.Group) -> list[str]:
     return sorted(demo_names, key=_key)
 
 
-def _inspect_file(path: str) -> _FileInfo:
+def _demo_is_successful(demo_attrs) -> bool:
+    """True if a demo's ``success`` attribute is set and it has at least one recorded sample.
+
+    A demo can carry success=True with num_samples=0 (an empty/truncated recording mistakenly
+    tagged successful, confirmed 2026-08-14 against a real dataset) -- treat that as
+    unsuccessful too, since there's no data to merge regardless of the flag.
+    """
+    if "success" not in demo_attrs or not bool(demo_attrs["success"]):
+        return False
+    return int(demo_attrs.get("num_samples", 1)) > 0
+
+
+def _inspect_file(path: str, drop_subtrees: list[str] | None = None) -> _FileInfo:
     """Open an input HDF5 file read-only and build a :class:`_FileInfo` summary."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Input file does not exist: {path}")
@@ -144,29 +176,39 @@ def _inspect_file(path: str) -> _FileInfo:
         # recorder stack within a single file, so this is the fast path. Intra-file
         # inconsistency (e.g. a file that was manually edited mid-session) is not detected
         # here; cross-file consistency is what _validate_compatibility checks.
-        schema_fingerprint = _build_schema_fingerprint(data_group[demo_names[0]])
+        schema_fingerprint = _build_schema_fingerprint(data_group[demo_names[0]], drop_subtrees)
 
         total_steps = 0
         success_count = 0
         no_success_attr_count = 0
         failed_count = 0
+        total_steps_successful = 0
         untracked_step_demos: list[str] = []
         for name in demo_names:
             demo = data_group[name]
             if "num_samples" in demo.attrs:
-                total_steps += int(demo.attrs["num_samples"])
+                demo_steps = int(demo.attrs["num_samples"])
             elif "actions" in demo:
-                total_steps += int(demo["actions"].shape[0])
+                demo_steps = int(demo["actions"].shape[0])
             else:
+                demo_steps = 0
                 untracked_step_demos.append(name)
+            total_steps += demo_steps
 
-            if "success" in demo.attrs:
-                if bool(demo.attrs["success"]):
+            has_success_attr = "success" in demo.attrs
+            # A demo can carry success=True with num_samples=0 (an empty/truncated recording
+            # mistakenly tagged successful, confirmed 2026-08-14 against a real dataset) --
+            # treat that as failed too, since there's no data to merge regardless of the flag.
+            is_success = has_success_attr and bool(demo.attrs["success"]) and demo_steps > 0
+            if has_success_attr:
+                if is_success:
                     success_count += 1
                 else:
                     failed_count += 1
             else:
                 no_success_attr_count += 1
+            if is_success:
+                total_steps_successful += demo_steps
 
     return _FileInfo(
         path=path,
@@ -179,6 +221,7 @@ def _inspect_file(path: str) -> _FileInfo:
         success_count=success_count,
         no_success_attr_count=no_success_attr_count,
         failed_count=failed_count,
+        total_steps_successful=total_steps_successful,
         untracked_step_demos=untracked_step_demos,
     )
 
@@ -213,7 +256,7 @@ class _ValidationReport:
     env_args_status: str = "OK"
 
 
-def _validate_compatibility(infos: list[_FileInfo]) -> _ValidationReport:
+def _validate_compatibility(infos: list[_FileInfo], success_only: bool = False) -> _ValidationReport:
     """Compare input files for compatibility and produce a :class:`_ValidationReport`."""
     report = _ValidationReport()
 
@@ -255,13 +298,14 @@ def _validate_compatibility(infos: list[_FileInfo]) -> _ValidationReport:
 
     for i in infos:
         if i.failed_count > 0:
+            disposition = "will be dropped (--success_only)" if success_only else "included as-is in the merged file"
             report.warnings.append(
-                f"{i.path}: {i.failed_count} demo(s) with success=False. record_demos.py "
-                "normally exports only successful demos; included as-is in the merged file."
+                f"{i.path}: {i.failed_count} demo(s) with success=False -- {disposition}."
             )
         if i.no_success_attr_count > 0:
+            disposition = "will be dropped (--success_only)" if success_only else "included as-is, legacy format"
             report.info.append(
-                f"{i.path}: {i.no_success_attr_count} demo(s) without @success attribute (legacy format)."
+                f"{i.path}: {i.no_success_attr_count} demo(s) without @success attribute -- {disposition}."
             )
         if i.untracked_step_demos:
             shown = ", ".join(i.untracked_step_demos[:3])
@@ -341,12 +385,25 @@ def _print_summary(
     print()
 
 
-def _merge(infos: list[_FileInfo], output_path: str) -> tuple[int, int, int]:
+def _merge(
+    infos: list[_FileInfo],
+    output_path: str,
+    success_only: bool = False,
+    drop_subtrees: list[str] | None = None,
+) -> tuple[int, int, int]:
     """Write a merged HDF5 dataset from validated inputs.
+
+    Args:
+        infos: Per-input-file summaries from :func:`_inspect_file`.
+        output_path: Path to write the merged HDF5 dataset to.
+        success_only: Skip demos whose ``success`` attribute is ``False`` or missing.
+        drop_subtrees: ``/``-separated group paths (relative to each demo group) to remove from
+            every copied demo, e.g. ``["checkpoints", "obs/raw_action"]``.
 
     Returns:
         A tuple ``(output_size_bytes, total_steps_written, total_demos_written)``.
     """
+    drop_subtrees = drop_subtrees or []
     format_version = infos[0].format_version
     merged_env_args = dict(infos[0].env_args)
     for other in infos[1:]:
@@ -366,6 +423,9 @@ def _merge(infos: list[_FileInfo], output_path: str) -> tuple[int, int, int]:
             with h5py.File(info.path, "r") as src:
                 src_data = src["data"]
                 for src_demo_name in _sorted_demo_names(src_data):
+                    src_demo_attrs = src_data[src_demo_name].attrs
+                    if success_only and not _demo_is_successful(src_demo_attrs):
+                        continue
                     dst_demo_name = f"demo_{total_demos_written}"
                     try:
                         src.copy(src_data[src_demo_name], data_out, name=dst_demo_name)
@@ -378,6 +438,9 @@ def _merge(infos: list[_FileInfo], output_path: str) -> tuple[int, int, int]:
                             f" dataset as {dst_demo_name}: {e}"
                         ) from e
                     dst_demo = data_out[dst_demo_name]
+                    for subtree in drop_subtrees:
+                        if subtree in dst_demo:
+                            del dst_demo[subtree]
                     if "num_samples" in dst_demo.attrs:
                         total_steps_written += int(dst_demo.attrs["num_samples"])
                     elif "actions" in dst_demo:
@@ -422,6 +485,27 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate inputs and print the merge report without writing the output file.",
     )
+    parser.add_argument(
+        "--success_only",
+        action="store_true",
+        help=(
+            "Drop individual demo_* groups whose success attribute is False or missing, instead of"
+            " copying every demo from every input file. Unlike pre-filtering the input file list,"
+            " this keeps the successful demos from a file that also contains failed ones."
+        ),
+    )
+    parser.add_argument(
+        "--drop_subtree",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "A '/'-separated group path (relative to each demo group, e.g. 'checkpoints' or"
+            " 'obs/raw_action') to exclude from both schema validation and the merged output."
+            " Repeatable. Use for recorder terms downstream consumers don't need and that may not"
+            " be uniform across inputs."
+        ),
+    )
     return parser
 
 
@@ -459,15 +543,28 @@ def main(argv: list[str] | None = None) -> int:
     infos: list[_FileInfo] = []
     for path in args.input_files:
         try:
-            infos.append(_inspect_file(path))
+            infos.append(_inspect_file(path, drop_subtrees=args.drop_subtree))
         except (FileNotFoundError, ValueError, OSError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
-    report = _validate_compatibility(infos)
+    report = _validate_compatibility(infos, success_only=args.success_only)
 
     if args.dry_run:
-        _print_summary(infos, args.output_file, report=report, dry_run=True)
+        if args.success_only:
+            preview_num_demos = sum(i.success_count for i in infos)
+            preview_total_steps = sum(i.total_steps_successful for i in infos)
+        else:
+            preview_num_demos = None
+            preview_total_steps = None
+        _print_summary(
+            infos,
+            args.output_file,
+            output_num_demos=preview_num_demos,
+            output_total_steps=preview_total_steps,
+            report=report,
+            dry_run=True,
+        )
         return 1 if report.errors else 0
 
     if report.errors:
@@ -487,7 +584,9 @@ def main(argv: list[str] | None = None) -> int:
     tmp_path = args.output_file + ".tmp"
     success = False
     try:
-        output_size, total_steps, total_demos = _merge(infos, tmp_path)
+        output_size, total_steps, total_demos = _merge(
+            infos, tmp_path, success_only=args.success_only, drop_subtrees=args.drop_subtree
+        )
         os.replace(tmp_path, args.output_file)
         success = True
     except Exception as e:

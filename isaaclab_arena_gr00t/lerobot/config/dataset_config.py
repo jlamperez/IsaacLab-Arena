@@ -6,6 +6,7 @@
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass
@@ -24,6 +25,26 @@ class Gr00tDatasetConfig:
     # NOTE(xinjieyao, 2025-09-25): robot joint position must exist in the HDF5 file
     state_name_sim: str = field(
         default="robot_joint_pos", metadata={"description": "Name of the state in the HDF5 file."}
+    )
+    state_group_path: str | None = field(
+        default=None,
+        metadata={
+            "description": (
+                "'/'-separated HDF5 group path holding state_name_sim, relative to the trajectory"
+                " group. Overrides the default 'obs' lookup, for datasets that record state outside"
+                " obs/ (e.g. under states/articulation/robot)."
+            )
+        },
+    )
+    trim_last_state_frame: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "Drop the last row of state/action/video arrays before writing. Matches Arena's own"
+                " Mimic recorder convention (obs has one more row than action); set False for"
+                " datasets whose state/action/video are already co-indexed with no extra trailing row."
+            )
+        },
     )
     left_eef_pos_name_sim: str = field(
         default=None, metadata={"description": "Name of the left eef position in the HDF5 file(optional)."}
@@ -49,8 +70,32 @@ class Gr00tDatasetConfig:
     action_name_sim: str = field(
         default="processed_actions", metadata={"description": "Name of the action in the HDF5 file."}
     )
+    action_source: Literal["joint_array", "lightwheel_wbc_command"] = field(
+        default="joint_array",
+        metadata={
+            "description": (
+                "'joint_array' remaps action_name_sim through policy_joints_config_path as named"
+                " joints (the Mimic-generated default). 'lightwheel_wbc_command' instead treats"
+                " action_name_sim as robofinals' packed 23-D G1-Gripper-Controller-DecoupledWBC"
+                " command (2 gripper scalars + 2x eef pose + navigate/base-height/torso-rpy"
+                " commands) and writes it through unprocessed, plus decomposed into the eef_pose/"
+                " gripper/teleop_* LeRobot columns below -- for datasets recorded via that"
+                " controller rather than Isaac Lab Mimic."
+            )
+        },
+    )
     pov_cam_name_sim: str = field(
         default="robot_head_cam", metadata={"description": "Name of the POV camera in the HDF5 file."}
+    )
+    pov_cam_names_sim: list[str] | None = field(
+        default=None,
+        metadata={
+            "description": (
+                "Names of multiple POV cameras in the HDF5 file, each under obs/<name>. Overrides"
+                " pov_cam_name_sim/video_name_lerobot when set; must be the same length as"
+                " video_names_lerobot."
+            )
+        },
     )
     # Gr00t-LeRobot datafield
     state_name_lerobot: str = field(
@@ -65,6 +110,23 @@ class Gr00tDatasetConfig:
 
     video_name_lerobot: str = field(
         default="observation.images.ego_view", metadata={"description": "Name of the video in the LeRobot file."}
+    )
+    video_names_lerobot: list[str] | None = field(
+        default=None,
+        metadata={
+            "description": (
+                "Names of multiple videos in the LeRobot file, parallel to pov_cam_names_sim."
+            )
+        },
+    )
+    action_gripper_name_lerobot: str = field(
+        default="action.gripper",
+        metadata={
+            "description": (
+                "Name of the 2-wide (left, right) gripper command in the LeRobot file, written when"
+                " action_source is lightwheel_wbc_command."
+            )
+        },
     )
     task_description_lerobot: str = field(
         default="annotation.human.action.task_description",
@@ -150,6 +212,14 @@ class Gr00tDatasetConfig:
         assert Path(self.state_joints_config_path).exists(), f"{self.state_joints_config_path} does not exist"
         assert Path(self.info_template_path).exists(), f"{self.info_template_path} does not exist"
         assert Path(self.modality_template_path).exists(), f"{self.modality_template_path} does not exist"
+        if self.pov_cam_names_sim is not None or self.video_names_lerobot is not None:
+            assert self.pov_cam_names_sim and self.video_names_lerobot, (
+                "pov_cam_names_sim and video_names_lerobot must both be set together"
+            )
+            assert len(self.pov_cam_names_sim) == len(self.video_names_lerobot), (
+                f"pov_cam_names_sim ({len(self.pov_cam_names_sim)}) and video_names_lerobot"
+                f" ({len(self.video_names_lerobot)}) must be the same length"
+            )
         # in case lerobot_data_dir already exists, may be left over from previous runs, ask for user confirmation before removing
         if self.lerobot_data_dir.exists():
             print(f"Warning: lerobot_data_dir {self.lerobot_data_dir} already exists.")
@@ -193,4 +263,14 @@ class Gr00tDatasetConfig:
         if "teleop_navigate_command" in self.hdf5_keys:
             self.lerobot_keys["teleop_navigate_command"] = "teleop.navigate_command"
         if "teleop_torso_orientation_rpy_command" in self.hdf5_keys:
+            self.lerobot_keys["teleop_torso_orientation_rpy_command"] = "teleop.torso_orientation_rpy_command"
+
+        # lightwheel_wbc_command mode decomposes the packed action into these fixed sub-parts
+        # unconditionally (there's no per-part HDF5 key to gate on -- they're all slices of the
+        # same action_name_sim array), unlike the optional-HDF5-key-driven keys set above.
+        if self.action_source == "lightwheel_wbc_command":
+            self.lerobot_keys["action_eef_pose"] = "action.eef_pose"
+            self.lerobot_keys["action_gripper"] = self.action_gripper_name_lerobot
+            self.lerobot_keys["teleop_navigate_command"] = "teleop.navigate_command"
+            self.lerobot_keys["teleop_base_height_command"] = "teleop.base_height_command"
             self.lerobot_keys["teleop_torso_orientation_rpy_command"] = "teleop.torso_orientation_rpy_command"

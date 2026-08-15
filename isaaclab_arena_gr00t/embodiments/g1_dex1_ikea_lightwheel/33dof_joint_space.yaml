@@ -1,0 +1,46 @@
+# Copyright (c) 2026, The Isaac Lab Arena Project Developers (https://github.com/isaac-sim/IsaacLab-Arena/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Column order for states/articulation/robot/joint_position (and joint_targets/*) in the
+# LightwheelAI/iros2026-ikea-assembly dataset (G1 + Dex1 gripper, 33 DoF). Columns 0-28 confirmed
+# identical to ../g1/43dof_joint_space.yaml's own leg/waist/arm ordering; columns 29-32 (Dex1
+# fingers) confirmed 2026-08-14 against a real Isaac Sim joint-resolution log from
+# robofinals/scripts/teleop/replay_main_local.py run against this dataset.
+joints:
+  "left_hip_pitch_joint": 0
+  "right_hip_pitch_joint": 1
+  "waist_yaw_joint": 2
+  "left_hip_roll_joint": 3
+  "right_hip_roll_joint": 4
+  "waist_roll_joint": 5
+  "left_hip_yaw_joint": 6
+  "right_hip_yaw_joint": 7
+  "waist_pitch_joint": 8
+  "left_knee_joint": 9
+  "right_knee_joint": 10
+  "left_shoulder_pitch_joint": 11
+  "right_shoulder_pitch_joint": 12
+  "left_ankle_pitch_joint": 13
+  "right_ankle_pitch_joint": 14
+  "left_shoulder_roll_joint": 15
+  "right_shoulder_roll_joint": 16
+  "left_ankle_roll_joint": 17
+  "right_ankle_roll_joint": 18
+  "left_shoulder_yaw_joint": 19
+  "right_shoulder_yaw_joint": 20
+  "left_elbow_joint": 21
+  "right_elbow_joint": 22
+  "left_wrist_roll_joint": 23
+  "right_wrist_roll_joint": 24
+  "left_wrist_pitch_joint": 25
+  "right_wrist_pitch_joint": 26
+  "left_wrist_yaw_joint": 27
+  "right_wrist_yaw_joint": 28
+  "left_dex1_finger_joint_1": 29
+  "left_dex1_finger_joint_2": 30
+  "right_dex1_finger_joint_1": 31
+  "right_dex1_finger_joint_2": 32
+
+total_joints: 33
