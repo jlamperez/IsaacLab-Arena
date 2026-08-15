@@ -764,6 +764,24 @@ G1_HOMIE_CFG.actuators["waist"].effort_limit = {
     "waist_pitch_joint": 50.0,
 }
 
+# Tried 2026-08-11: raising just right_elbow_joint's damping to robofinals' real value
+# (22.8, vs. Arena's stock 2.0, with near-identical stiffness 39.0 vs. 40.0) under
+# IdealPD, isolating one variable from the three full ImplicitActuatorCfg-for-"arms"
+# swaps below (all reverted -- see that comment for the full history). Reverted too, and
+# worse than any prior attempt: peak right_elbow_joint tracking error grew to +1.10rad
+# (~63deg) at step 210 (vs. ~0.48rad/27deg stock), and saturation events hit 335 in the
+# first 387 steps alone (vs. 109 across the *entire* 999-step episode under the reverted
+# ImplicitActuatorCfg attempt). Root cause: the direct-arm-override action
+# (JointPositionActionCfg) only ever commands a position target, never a velocity one --
+# so control_action.joint_velocities is always 0, and IdealPD's damping term
+# kd*(qdot_des - qdot) reduces to kd*(-qdot): pure braking against the joint's own
+# motion, not overshoot damping against a moving reference. Raising kd in isolation (with
+# no matching velocity feedforward to damp against) just fights the elbow's own attempt
+# to catch up to a fast-changing target harder, demanding more torque to overcome its own
+# brake -- explaining both the worse lag and the much heavier saturation. Confirms
+# robofinals' per-joint gains aren't safely transferable one field at a time either;
+# "arms" stays G1_CFG's stock IdealPDActuatorCfg.
+
 # Replaced 2026-08-09: robofinals' G1_GEARWBC_CFG uses ImplicitActuatorCfg for legs/waist
 # (PhysX integrates the PD law continuously, at the full 200Hz physics rate), while
 # G1_CFG's legs/waist used IdealPDActuatorCfg (an explicit PD law computed once per 50Hz

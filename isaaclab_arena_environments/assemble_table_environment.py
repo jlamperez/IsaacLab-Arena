@@ -225,6 +225,11 @@ class AssembleTableEnvironmentCfg(ArenaEnvironmentCfg):
     held_object: str = "leg001"  # table leg -- picked up and inserted
     background: str = "table278"  # the kit's own workbench -- Table001/Leg001 rest on this in Scene02.usd
     embodiment: str = "g1_wbc_agile_pink_dex1"
+    # TaskBase.DEFAULT_EPISODE_LENGTH_S's own default (20.0) is far shorter than a full
+    # walk-to-table + grasp + insert sequence needs once the robot's start pose is matched to
+    # the dataset's own real (far) starting offset -- see assemble_table_environment.py's
+    # AssemblyTask(...) call and isaaclab_arena_gr00t's g1_dex1_ikea_lightwheel session notes.
+    episode_length_s: float = 20.0
 
 
 @register_environment
@@ -373,13 +378,44 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # nearest leg (see gr00t_dex1_eef_closedloop_policy.py's session notes) before losing
         # balance/camera framing around t=6-7s -- shortening the remaining reach distance may
         # reduce how far the arm/torso has to commit. Per Jorge, pushed past the -0.02 first
-        # try, back to x=0.02 -- the same value rejected as "too close" on 2026-07-31, but
+        # try, to x=0.02 -- the same value rejected as "too close" on 2026-07-31, but
         # that was before the quaternion-convention fix, the EEF-composition fix, and the
         # 4-leg scene composition above, so worth re-testing now rather than assuming it
-        # still holds.
+        # still holds. Moved back out to x=-0.05, 2026-08-15 (Jorge's request, testing the
+        # g1_dex1_ikea_lightwheel/HOMIE_V2 checkpoint) -- x=0.02 was tuned for the earlier
+        # BitRobot EEF checkpoint's reach, not necessarily right for this one.
+        #
+        # x/y set to the dataset's own real robot-vs-table starting offset, 2026-08-15: pulled
+        # robot_pos0/table_pos0 from states/articulation/robot/root_pose[0] and
+        # initial_state/rigid_object/Table001_Table001_01/root_pose[0] across 8 real demo files
+        # (different HDF5s/demo indices) -- the offset is bit-identical across all 8, i.e. a
+        # fixed (non-randomized) start, not per-episode variation: offset = robot_pos0 - table_pos0
+        # = (-0.9649, +0.0274, -0.0080). Composed onto Arena's own table position the same way
+        # lightwheel_hdf5_replay_policy.py's _ARENA_TABLE_POS + robot_offset_from_table already
+        # does for its (separately-tuned) replay pose. ~0.965m from the table in x is well beyond
+        # the ~0.42m max arm reach measured 2026-07-30 -- every real recorded demo genuinely
+        # required the robot to walk (navigate_cmd) to reach the legs, unlike the closer
+        # reach-only poses tried above (x=-0.05..0.02), which never gave the checkpoint a chance
+        # to exercise that learned walk-then-reach behavior.
+        #
+        # Rotation reset to identity, 2026-08-15 (Jorge's request -- the prior ~10deg yaw, tuned
+        # for a much closer reach-only pose, was suspected of disorienting the longer walk this
+        # far-pose now requires): checked the same 8 real demos' robot_pose0 quaternion, all
+        # near-identity (qx=0.00034, qy=0.00249, qz=0.000015, qw=0.99999690, i.e. yaw~=0) --
+        # and Table001's own recorded quaternion in the dataset is bit-identical to the
+        # rotation_xyzw already used for fixed_asset below ((0.7071, 0.7071, 0, 0)), confirming
+        # the dataset's world frame and Arena's assemble_table frame are already consistently
+        # aligned with no rotation offset needed. So the robot's real recorded orientation maps
+        # directly to Arena's identity rotation, not the old yaw-turned pose.
+        #
+        # Tried nudging right (robot's own -y side, per the "left side (its local +y axis)"
+        # comment above), 2026-08-15 per Jorge, watching the long-episode rollout live: y: 0.0274
+        # -> -0.10 -> -0.20. Reverted back to the dataset's own real y=0.0274 (per Jorge, "deja el
+        # robot sin mover hacia la y, por defecto la posicion de inicio del dataset") -- the
+        # right-shifted values were an unvalidated experiment, not a confirmed improvement.
         embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(
             enable_cameras=cfg.enable_cameras,
-            initial_pose=Pose(position_xyz=(0.02, -0.203, 0.78), rotation_xyzw=(0.0, 0.0, -0.08715574274765817, 0.9961946980917455)),
+            initial_pose=Pose(position_xyz=(-0.4649, 0.0274, 0.78), rotation_xyzw=(0.0, 0.0, 0.0, 1.0)),
         )
         # Step 3: Place the support surface and the two assembly parts.
         # These poses are read directly out of the kit's own reference scene
@@ -455,6 +491,7 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # Step 5: Define the task
         task = AssemblyTask(
             task_description="Assemble the table leg into the tabletop",
+            episode_length_s=cfg.episode_length_s,
             fixed_asset=fixed_asset,
             held_asset=held_asset,
             auxiliary_asset_list=[],
@@ -525,12 +562,19 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         )
 
         # Step 6: Assemble the environment
+        # _set_robofinals_physx_scene_params disabled 2026-08-12 (temporary, A/B test): robofinals'
+        # own live "Replay Mode" env dump for AssembleTableTask shows sim.physics=None -- the
+        # bounce_threshold_velocity/friction_correlation_distance match applied by this callback
+        # comes from set_physx_scene_params() call sites in core/tasks/base.py/core/rl/base.py/
+        # core/scenes/kitchen/kitchen.py, none of which this replay-mode env construction path
+        # appears to go through. Testing whether Arena's own PhysX scene defaults (unset here)
+        # track the real recording better than the "fixed" values did.
         isaaclab_arena_environment = IsaacLabArenaEnvironment(
             name=self.name,
             embodiment=embodiment,
             scene=scene,
             task=task,
-            env_cfg_callback=_set_robofinals_physx_scene_params,
+            env_cfg_callback=None,
         )
         return isaaclab_arena_environment
 
