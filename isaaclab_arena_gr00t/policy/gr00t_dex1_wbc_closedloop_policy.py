@@ -271,6 +271,101 @@ class Gr00tDex1WBCClosedloopPolicy(PolicyBase[Gr00tDex1WBCClosedloopPolicyCfg]):
                 f"[gr00t_dex1_wbc_debug] left_wrist_pose min/max per-dim: "
                 f"{left_wrist_pose.min(axis=0)} / {left_wrist_pose.max(axis=0)}"
             )
+
+            # Ground-truth geometry, projected into the dataset_first_person_cam frame saved
+            # below -- computed here with IsaacLab's own tested frame-math utilities
+            # (combine_frame_transforms/subtract_frame_transforms/
+            # convert_camera_frame_orientation_convention), not hand-rolled quaternion code, after
+            # two rounds of hand-derived versions landed points visibly off the actual gripper
+            # (2026-08-18). Saved as already-in-camera-RDF-frame (x=right, y=down, z=forward)
+            # coordinates, so the offline analysis script only has to do the trivial pinhole
+            # division -- no rotation math left to get wrong downstream.
+            import warp as wp
+            from isaaclab.utils.math import (
+                combine_frame_transforms,
+                convert_camera_frame_orientation_convention,
+                subtract_frame_transforms,
+            )
+
+            robot_asset = env.unwrapped.scene["robot"]
+            root_pos_w = robot_asset.data.root_pos_w[0].detach().cpu().numpy()
+            root_quat_w = robot_asset.data.root_quat_w[0].detach().cpu().numpy()
+            if self._chunk_count == 1:
+                print(f"[gr00t_dex1_wbc_debug] body_names: {robot_asset.data.body_names}")
+
+            body_state_w_all = wp.to_torch(robot_asset.data.body_link_state_w)[0]  # (num_bodies, 7), still torch
+            body_names = robot_asset.data.body_names
+            torso_idx = body_names.index("torso_link")
+            torso_pos_w_t = body_state_w_all[torso_idx, :3].unsqueeze(0)
+            torso_quat_w_t = body_state_w_all[torso_idx, 3:7].unsqueeze(0)
+
+            # dataset_first_person_cam's own cam_sensor.data.pos_w/quat_w_* is stale -- confirmed
+            # 2026-08-18 by comparing consecutive chunks: it never updates after spawn
+            # (CameraCfg.update_latest_camera_pose defaults False and isn't overridden for this
+            # camera). Reconstruct it fresh every chunk from torso_link's live pose instead, via
+            # the same fixed offset used at spawn (_DEX1_DATASET_FIRST_PERSON_CAMERA_OFFSET,
+            # isaaclab_arena/embodiments/g1/g1.py:171-174; rot is convention="opengl").
+            camera_offset_pos_t = torch.tensor([[0.10209156, -0.00937542, 0.42446595]], device=torso_pos_w_t.device)
+            camera_offset_rot_opengl_t = torch.tensor(
+                [[0.26523914, -0.27106013, -0.66472446, 0.64367383]], device=torso_pos_w_t.device
+            )
+            cam_pos_w_t, cam_quat_opengl_w_t = combine_frame_transforms(
+                torso_pos_w_t, torso_quat_w_t, camera_offset_pos_t, camera_offset_rot_opengl_t
+            )
+            cam_quat_ros_w_t = convert_camera_frame_orientation_convention(
+                cam_quat_opengl_w_t, origin="opengl", target="ros"
+            )
+            cam_pos_w = cam_pos_w_t[0].detach().cpu().numpy()
+            cam_quat_w = cam_quat_ros_w_t[0].detach().cpu().numpy()
+
+            def _rdf(pos_w_t: torch.Tensor) -> np.ndarray:
+                """World-frame (1, 3) position -> camera RDF-frame (x=right,y=down,z=forward)."""
+                rdf_t, _ = subtract_frame_transforms(cam_pos_w_t, cam_quat_ros_w_t, pos_w_t.unsqueeze(0))
+                return rdf_t[0].detach().cpu().numpy()
+
+            # Which link along the arm chain is visually "the hand" in the camera frame is not
+            # obvious by name alone (finger_link_1/2's projected position landed on the forearm,
+            # not the small gripper claw visible near the table edge in earlier attempts) -- dump
+            # every left/right arm-chain link's RDF-projected position, not just a guessed one,
+            # and let project_wrist_target.py show which actually lands on the visible gripper.
+            _ARM_CHAIN_SUFFIXES = [
+                "shoulder_pitch_link",
+                "shoulder_roll_link",
+                "shoulder_yaw_link",
+                "elbow_link",
+                "wrist_roll_link",
+                "wrist_pitch_link",
+                "wrist_yaw_link",
+                "dex1_finger_link_1",
+                "dex1_finger_link_2",
+            ]
+            arm_link_rdf = {
+                f"{side}_{suffix}": _rdf(body_state_w_all[body_names.index(f"{side}_{suffix}"), :3])
+                for side in ("left", "right")
+                for suffix in _ARM_CHAIN_SUFFIXES
+            }
+
+            # Predicted wrist targets are pelvis-relative, not world frame -- confirmed 2026-08-18
+            # numerically (adding root_pos_w alone to the raw target landed within a few cm of the
+            # actual current hand position). Compose through root_pos_w/root_quat_w before
+            # projecting, same as any other body-relative point.
+            left_target_local_t = torch.from_numpy(left_wrist_pose[0, :3]).unsqueeze(0).to(torso_pos_w_t.device)
+            right_target_local_t = torch.from_numpy(right_wrist_pose[0, :3]).unsqueeze(0).to(torso_pos_w_t.device)
+            root_pos_w_t = torch.from_numpy(root_pos_w).unsqueeze(0).to(torso_pos_w_t.device)
+            root_quat_w_t = torch.from_numpy(root_quat_w).unsqueeze(0).to(torso_pos_w_t.device)
+            left_target_world_t, _ = combine_frame_transforms(root_pos_w_t, root_quat_w_t, left_target_local_t)
+            right_target_world_t, _ = combine_frame_transforms(root_pos_w_t, root_quat_w_t, right_target_local_t)
+            target_rdf_left = _rdf(left_target_world_t[0])
+            target_rdf_right = _rdf(right_target_world_t[0])
+            print(f"[gr00t_dex1_wbc_debug] target rdf left/right (x=right,y=down,z=forward): {target_rdf_left} / {target_rdf_right}")
+
+            try:
+                from PIL import Image
+
+                Image.fromarray(first_person).save(f"{_DEBUG_DUMP_DIR}/chunk_{self._chunk_count:03d}_first_person.png")
+            except Exception as e:  # noqa: BLE001
+                print(f"[gr00t_dex1_wbc_debug] failed to save debug camera frame: {e}")
+
             np.savez(
                 f"{_DEBUG_DUMP_DIR}/chunk_{self._chunk_count:03d}.npz",
                 **{f"state_{group}": arr for group, arr in state.items()},
@@ -281,6 +376,13 @@ class Gr00tDex1WBCClosedloopPolicy(PolicyBase[Gr00tDex1WBCClosedloopPolicyCfg]):
                 navigate_cmd=navigate_cmd,
                 torso_rpy_cmd=torso_rpy_cmd,
                 task_description=self.task_description,
+                root_pos_w=root_pos_w,
+                root_quat_w=root_quat_w,
+                cam_pos_w=cam_pos_w,
+                cam_quat_w=cam_quat_w,
+                target_rdf_left=target_rdf_left,
+                target_rdf_right=target_rdf_right,
+                **{f"rdf_{name}": arr for name, arr in arm_link_rdf.items()},
             )
 
         actions = np.zeros((horizon, _ACTION_DIM), dtype=np.float32)
