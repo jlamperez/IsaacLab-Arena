@@ -165,7 +165,7 @@ def _register_local_assets(asset_registry: AssetRegistry) -> None:
 
 
 def _spawn_dark_ground_plane(prim_path, cfg, translation=None, orientation=None, **kwargs):
-    """Spawn the stock grid ground plane, then dim it to match robofinals' floor.
+    """Spawn the stock grid ground plane, then dim it and fix its tile size to match robofinals' floor.
 
     GroundPlaneCfg only exposes the grid material's ``diffuse_tint`` (via its ``color``
     field); robofinals' own reference scene leaves that at its default (1,1,1) and instead
@@ -173,8 +173,23 @@ def _spawn_dark_ground_plane(prim_path, cfg, translation=None, orientation=None,
     grid material -- see the comment above this function's call site in build() for how
     that was confirmed. Patched here via USD directly since the dataclass has no field
     for it.
+
+    ``inputs:texture_scale`` gets the same treatment, 2026-08-16: Jorge noticed live in Kit
+    that Arena's grid squares render visibly wider than robofinals' own floor. Checked
+    robofinals' reference material directly (submodules/IROS_IKEA_V13_20260702/Scene02.usd,
+    prim /World/FlatGrid/Looks/theGrid/Shader) -- it has no ``texture_scale`` input authored
+    at all (unlike ``albedo_brightness``, which robofinals does override), so it inherits
+    whatever the base OmniPBR material's own schema default is. Arena's copy (spawned fresh
+    from the stock ``default_environment.usd`` asset) has it explicitly authored to
+    ``(0.5, 0.5)`` -- confirmed by dumping the live shader's actual attributes (Kit's Property
+    panel shows this field under the friendly label "Texture Tiling", which does NOT match its
+    real USD name -- a first attempt at this fix wrote to a nonexistent ``inputs:texture_tiling``
+    and silently created an unused property instead of changing anything visible). Half the
+    tiling frequency means each grid square renders at roughly 2x robofinals' size. Set to
+    ``(1.0, 1.0)`` here (the standard default for this kind of parameter) and confirmed
+    visually by Jorge in Kit that it now matches robofinals' apparent grid density.
     """
-    from pxr import Sdf  # noqa: PLC0415
+    from pxr import Gf, Sdf  # noqa: PLC0415
 
     import isaaclab.sim as sim_utils  # noqa: PLC0415
 
@@ -183,6 +198,11 @@ def _spawn_dark_ground_plane(prim_path, cfg, translation=None, orientation=None,
         prop_path=f"{prim_path}/Looks/theGrid/Shader.inputs:albedo_brightness",
         value=0.19,
         type_to_create_if_not_exist=Sdf.ValueTypeNames.Float,
+    )
+    sim_utils.change_prim_property(
+        prop_path=f"{prim_path}/Looks/theGrid/Shader.inputs:texture_scale",
+        value=Gf.Vec2f(1.0, 1.0),
+        type_to_create_if_not_exist=Sdf.ValueTypeNames.Float2,
     )
     return prim
 
@@ -247,7 +267,7 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
 
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.scene.scene import Scene
-        from isaaclab_arena.tasks.assembly_task import AssemblyTask
+        from isaaclab_arena.tasks.assembly_task import AssemblyTask, G1AssemblySingleLegMimicEnvCfg
         from isaaclab_arena.utils.pose import Pose
 
         # Step 1: Retrieve assets from the registry
@@ -452,6 +472,13 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
         # Room floor -- Table278's placement above preserves its own floor
         # contact from Scene02.usd (its base sits at world z~0), so the floor
         # itself belongs at z=0.
+        #
+        # No x/y offset here, unlike the other Scene02.usd-derived assets above: checked
+        # directly in Scene02.usd (2026-08-16) and robofinals' own /World/FlatGrid ground
+        # plane -- the same theGrid material/Wireframe_blue.png this spawner recreates --
+        # sits at xformOp:translate (0, 0, 0), with no offset of its own. So (0, 0, 0) here
+        # is the one that matches the reference, not a guess left over from before the grid
+        # was investigated.
         ground_plane.set_initial_pose(Pose(position_xyz=(0.0, 0.0, 0.0)))
 
         # Extra legs (cosmetic only -- NOT tracked by AssemblyTask's fixed/held-asset
@@ -520,6 +547,15 @@ class AssembleTableEnvironment(ArenaEnvironmentFactory[AssembleTableEnvironmentC
             # that (plus leg001's own size) or the sampler can still land the leg on
             # top of the tabletop.
             min_separation=0.4,
+            # arm_mode is what ArenaEnvBuilder.compose_manager_cfg actually passes to
+            # get_mimic_env_cfg (confirmed 2026-08-22) -- the embodiment name string this cfg
+            # needs comes from cfg.embodiment instead.
+            mimic_env_cfg_factory=lambda arm_mode: G1AssemblySingleLegMimicEnvCfg(
+                embodiment_name=cfg.embodiment,
+                fixed_asset_name=fixed_asset.name,
+                held_asset_name=held_asset.name,
+                assist_asset_list_names=[],
+            ),
         )
 
         # AssemblyTask always randomizes fixed_asset/held_asset independently within
